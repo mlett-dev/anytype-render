@@ -15,6 +15,14 @@ CLI="$AR_CLI_CONTAINER"
 TAG="${AR_TAG:-local}"
 NAME="${AR_NAME:-anytype-render}"
 
+# A test instance next to the production one: its own name and ports
+# (AR_NAME, AR_APP_PORT, AR_API_PORT), and with AR_DEV_SRC=1 this checkout's
+# service/src mounted over the image's, so a restart replaces a rebuild.
+EXTRA=()
+if [ -n "${AR_APP_PORT:-}" ]; then APP_PORT="$AR_APP_PORT"; export APP_PORT; EXTRA+=(-e APP_PORT); fi
+if [ -n "${AR_API_PORT:-}" ]; then API_PORT="$AR_API_PORT"; export API_PORT; EXTRA+=(-e API_PORT); fi
+if [ "${AR_DEV_SRC:-}" = 1 ]; then EXTRA+=(-v "$AR_ROOT/service/src:/app/src:ro"); fi
+
 SESSION_TOKEN="$(docker exec "$CLI" /usr/local/bin/print-session-token)"
 ACCOUNT_ID="$(docker exec "$CLI" /usr/local/bin/anytype auth status 2>&1 \
   | sed 's/\x1b\[[0-9;]*m//g' | sed -n 's/.*Logged in to account \([A-Za-z0-9]*\).*/\1/p' | head -1)"
@@ -29,4 +37,5 @@ exec docker run --rm --init --name "$NAME" \
   --network "container:${CLI}" \
   --memory 2g --shm-size 512m \
   -e SESSION_TOKEN -e ACCOUNT_ID \
+  "${EXTRA[@]}" \
   "anytype-render:${TAG}"

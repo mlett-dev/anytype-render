@@ -290,51 +290,206 @@ function initScript ({ accountId, token, theme, spaceId, objectId, expandIds }) 
 	});
 }
 
+// Where the content ends, in page pixels: the lowest leaf element that shows
+// something (text, media, a painted surface). #page's scrollHeight is no
+// measure: it includes the editor's bottom padding and never drops below the
+// window, and sets stretch their dataview to the window height.
+function contentBottom () {
+	const all = [...document.querySelectorAll('#page *')];
+	// Fixed elements (the discussion button) sit at the window's bottom edge.
+	const fixed = all.filter(el => getComputedStyle(el).position === 'fixed');
+	const media = new Set([ 'IMG', 'SVG', 'svg', 'CANVAS', 'VIDEO', 'INPUT', 'IFRAME' ]);
+	// What the eye sees: text, media, or a painted surface. Drop targets
+	// and resize sensors are leaves too, but invisible and stretched.
+	const shows = (el, r) => {
+		if ((el.textContent || '').trim() || media.has(el.tagName)) {
+			return true;
+		}
+		const cs = getComputedStyle(el);
+		const painted = (cs.backgroundImage !== 'none') || !/rgba\(0, 0, 0, 0\)|transparent/.test(cs.backgroundColor) ||
+			(parseFloat(cs.borderTopWidth) > 0) || (parseFloat(cs.borderBottomWidth) > 0);
+		return painted && (r.height < window.innerHeight * 0.8);
+	};
+	let max = 0;
+	for (const el of all) {
+		if (el.childElementCount || fixed.some(f => f.contains(el))) {
+			continue;
+		}
+		const r = el.getBoundingClientRect();
+		if ((r.height > 0) && (r.width > 0) && (getComputedStyle(el).visibility !== 'hidden') && shows(el, r)) {
+			max = Math.max(max, r.bottom);
+		}
+	}
+	// A full-page grid is virtualized: only the rows in the window are in the
+	// DOM, but its inner container spans every loaded row.
+	for (const el of document.querySelectorAll('#page .ReactVirtualized__Grid__innerScrollContainer')) {
+		max = Math.max(max, el.getBoundingClientRect().bottom);
+	}
+	return Math.ceil(max);
+}
+
 // Measured in the page after it has settled. Facts a model cannot get from
 // block-list: what the GUI actually made of widths and text. Selectors follow
-// anytype-ts v0.56.1 (component/block/table.tsx, table/row.tsx, table/cell.tsx).
-function layoutReport () {
+// anytype-ts v0.56.1: block tables (component/block/table.tsx, table/row.tsx,
+// table/cell.tsx) and dataview views (component/block/dataview.tsx,
+// dataview/view/grid*), whose grid wraps in a .scrollWrap as well.
+function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 	const page = document.querySelector('#page');
 	const wrapper = document.querySelector('.editorWrapper');
 	const blockId = el => el.closest('[id^="block-"]')?.id.slice('block-'.length) || null;
 	const overflowsX = el => el.scrollWidth > el.clientWidth + 1;
+	// Cut by its box: wider than it, overflow hidden (an ellipsis is that too).
+	const clipsX = el => overflowsX(el) && (getComputedStyle(el).overflowX !== 'visible');
+	// In the picture: overlaps the captured area and is laid out at all.
+	const captured = (el) => {
+		const r = el.getBoundingClientRect();
+		return (r.top < captureHeight) && (r.bottom >= 0) && (el.getClientRects().length > 0);
+	};
 	// Rendered text lines: distinct tops of the text's line boxes.
 	const lines = (el) => {
 		const range = document.createRange();
 		range.selectNodeContents(el);
 		return new Set([...range.getClientRects()].filter(r => r.width > 0).map(r => Math.round(r.top))).size;
 	};
+	const first10 = list => list.slice(0, 10);
+	const unique = list => [...new Set(list)];
 
-	const tables = [...document.querySelectorAll('.scrollWrap')].filter(w => w.querySelector('.table')).map((wrap) => {
-		const first = wrap.querySelector('.row');
-		const cells = [...wrap.querySelectorAll('.cell')];
-		const texts = cells.map(c => c.querySelector('.editable')).filter(Boolean);
+	const tables = [...document.querySelectorAll('.scrollWrap')]
+		.filter(w => w.querySelector('.table') && !w.closest('.blockDataview'))
+		.map((wrap) => {
+			const rows = [...wrap.querySelectorAll('.table .row')];
+			const clipped = [];
+			let wrapped = 0;
+			rows.forEach((row, r) => [...row.querySelectorAll('.cell')].forEach((cell, c) => {
+				const text = cell.querySelector('.editable');
+				if (!text) {
+					return;
+				}
+				if (overflowsX(text)) {
+					clipped.push({ row: r, column: c });
+				}
+				if ((text.textContent || '').trim() && (lines(text) > 1)) {
+					wrapped++;
+				}
+			}));
+			return {
+				block_id: blockId(wrap),
+				column_widths_px: rows.length ? [...rows[0].querySelectorAll('.cell')].map(c => Math.round(c.getBoundingClientRect().width)) : [],
+				width_px: Math.round(wrap.querySelector('.table').getBoundingClientRect().width),
+				visible_width_px: Math.round(wrap.clientWidth),
+				// Wider than the page: the GUI scrolls it sideways, so part is hidden.
+				cut_off: overflowsX(wrap),
+				cells_wrapped: wrapped,
+				cells_clipped: clipped.length,
+				clipped_cells: first10(clipped),
+			};
+		});
+
+	// Queries and collections, embedded or as the object itself. Row counts
+	// come from the frontend's record store (window.Anytype outside packaged
+	// builds), the rest from the DOM.
+	const S = window.Anytype?.Lib?.S;
+	const keyOf = el => [...el.classList].find(c => c.startsWith('cell-key-'))?.slice('cell-key-'.length);
+	const dataviews = [...document.querySelectorAll('.block.blockDataview')].map((block) => {
+		const id = block.id.slice('block-'.length);
+		const content = block.querySelector('.viewContent');
+		const view = [...(content?.classList || [])].map(c => /^view(Grid|Board|Gallery|List|Calendar|Graph|Timeline)$/.exec(c)?.[1]).find(Boolean)?.toLowerCase() || null;
+		const records = [...block.querySelectorAll('[id^="record-"]')];
+		const out = {
+			block_id: id,
+			kind: block.querySelector('.isCollection') ? 'collection' : 'query',
+			view,
+			rows_shown: records.filter(captured).length,
+		};
+		let total;
+		try {
+			total = S?.Record?.getMeta(S.Record.getSubId(objectId, id), '')?.total;
+		} catch {}
+		if (Number.isFinite(total)) {
+			out.rows_total = total;
+		}
+		if ((view !== 'grid') || !content) {
+			return out;
+		}
+
+		const head = [...content.querySelectorAll('.rowHead .cellHead')].filter(c => keyOf(c));
+		const names = new Map(head.map(h => [ keyOf(h), (h.querySelector('.name')?.textContent || keyOf(h)).trim() ]));
+		const scroll = block.querySelector('.scroll');
+		// With "wrap content" on, cells grow instead of cutting their text.
+		const wraps = content.classList.contains('wrapContent');
+		const cut = [];
+		let wrapped = 0;
+		records.forEach((row, r) => {
+			if (!captured(row)) {
+				return;
+			}
+			for (const cell of row.querySelectorAll('.cell')) {
+				const key = keyOf(cell);
+				if (!key) {
+					continue;
+				}
+				if (wraps) {
+					wrapped += (lines(cell) > 1) ? 1 : 0;
+				} else if ([ cell, ...cell.querySelectorAll('*') ].some(clipsX)) {
+					cut.push({ row: r, column: names.get(key) || key });
+				}
+			}
+		});
 		return {
-			block_id: blockId(wrap),
-			column_widths_px: first ? [...first.querySelectorAll('.cell')].map(c => Math.round(c.getBoundingClientRect().width)) : [],
-			width_px: Math.round(wrap.querySelector('.table').getBoundingClientRect().width),
-			visible_width_px: Math.round(wrap.clientWidth),
-			// Wider than the page: the GUI scrolls it sideways, so part is hidden.
-			cut_off: overflowsX(wrap),
-			cells_wrapped: texts.filter(t => (t.textContent || '').trim() && lines(t) > 1).length,
-			cells_clipped: texts.filter(overflowsX).length,
+			...out,
+			columns: head.map(h => ({ name: names.get(keyOf(h)), width_px: Math.round(h.getBoundingClientRect().width) })),
+			width_px: Math.round(content.getBoundingClientRect().width),
+			visible_width_px: scroll ? Math.round(scroll.clientWidth) : null,
+			cut_off: scroll ? overflowsX(scroll) : false,
+			...(wraps ? { cells_wrapped: wrapped } : { cells_truncated: cut.length, truncated_cells: first10(cut) }),
 		};
 	});
 
 	const textBlocks = [...document.querySelectorAll('[id^="block-"] .editable')].filter(el => !el.closest('.scrollWrap'));
-	const images = [...document.querySelectorAll('#page img')]
-		.filter(img => img.complete && (img.naturalWidth === 0) && !img.src.startsWith('data:')).length;
-	const kind = [...(page?.classList || [])].map(c => /^pageMain([A-Z][a-z]+)/.exec(c)?.[1]).find(Boolean);
+	const images = [...document.querySelectorAll('#page img')].filter(img => !img.src.startsWith('data:') && captured(img));
+	const where = img => blockId(img) || 'page';
+	let kind = [...(page?.classList || [])].map(c => /^pageMain([A-Z][a-z]+)/.exec(c)?.[1]).find(Boolean)?.toLowerCase() || null;
+	// Collections open in the same page component as sets.
+	if ((kind === 'set') && document.querySelector('#block-dataview .isCollection')) {
+		kind = 'collection';
+	}
 
 	return {
-		layout: kind ? kind.toLowerCase() : null,
+		layout: kind,
 		content_width_px: wrapper ? Math.round(wrapper.getBoundingClientRect().width) : null,
-		height_px: page ? page.scrollHeight : document.documentElement.scrollHeight,
+		content_height_px: bottom,
 		tables,
-		clipped_blocks: [...new Set(textBlocks.filter(overflowsX).map(blockId).filter(Boolean))],
-		images_failed: images,
+		dataviews,
+		clipped_blocks: unique(textBlocks.filter(overflowsX).map(blockId).filter(Boolean)),
+		images_failed: unique(images.filter(img => img.complete && (img.naturalWidth === 0)).map(where)),
+		images_loading: unique(images.filter(img => !img.complete).map(where)),
+		// Asked to be open but shown closed (or not shown): the frontend's
+		// toggle storage, which the init script fills, no longer takes.
+		toggles_not_open: expandIds.filter(id => !document.getElementById(`block-${id}`)?.classList.contains('isToggled')),
 		blocks_in_dom: document.querySelectorAll('[id^="block-"]').length,
 	};
+}
+
+// Fonts, and the images inside the captured area, with a deadline: a picture
+// taken while they load shows fallback glyphs and empty frames. Images below
+// the captured area may never load (lazy) and do not count.
+async function settle (page, captureHeight) {
+	const fonts = await page.evaluate(() => Promise.race([
+		document.fonts.ready.then(() => true),
+		new Promise(resolve => setTimeout(() => resolve(false), 3000)),
+	]));
+	const deadline = Date.now() + 8000;
+	while (Date.now() < deadline) {
+		const loading = await page.evaluate(h => [...document.querySelectorAll('#page img')].some((img) => {
+			const r = img.getBoundingClientRect();
+			return !img.complete && !img.src.startsWith('data:') && (r.top < h) && (r.bottom >= 0) && (img.getClientRects().length > 0);
+		}), captureHeight);
+		if (!loading) {
+			break;
+		}
+		await page.waitForTimeout(200);
+	}
+	return { fonts };
 }
 
 async function render (opts) {
@@ -426,7 +581,8 @@ async function render (opts) {
 			const why = run.openErrors[0] || (opened ? 'the frontend showed a different object (wrong space_id?)' : 'the page did not leave the loading route');
 			throw Object.assign(new Error(`the object did not open: ${why}`), { status: 404 });
 		}
-		await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+		// Still loading after 10 s: take the picture anyway, and say so.
+		const networkIdle = await page.waitForLoadState('networkidle', { timeout: 10000 }).then(() => true, () => false);
 		await page.waitForTimeout(800);
 
 		const url = page.url();
@@ -452,39 +608,14 @@ async function render (opts) {
 			}
 		}
 
+		const { fonts } = await settle(page, height);
+
 		// Some layouts (sets, collections) report far more height than their
 		// content uses, and their dataview stretches to fill the window. Cut
 		// below the lowest leaf element (text, icon, row), which containers
 		// stretched to the window cannot fake.
+		const bottom = await page.evaluate(contentBottom);
 		if (fullHeight) {
-			const bottom = await page.evaluate(() => {
-				const all = [...document.querySelectorAll('#page *')];
-				// Fixed elements (the discussion button) sit at the window's bottom edge.
-				const fixed = all.filter(el => getComputedStyle(el).position === 'fixed');
-				const media = new Set([ 'IMG', 'SVG', 'svg', 'CANVAS', 'VIDEO', 'INPUT', 'IFRAME' ]);
-				// What the eye sees: text, media, or a painted surface. Drop targets
-				// and resize sensors are leaves too, but invisible and stretched.
-				const shows = (el, r) => {
-					if ((el.textContent || '').trim() || media.has(el.tagName)) {
-						return true;
-					}
-					const cs = getComputedStyle(el);
-					const painted = (cs.backgroundImage !== 'none') || !/rgba\(0, 0, 0, 0\)|transparent/.test(cs.backgroundColor) ||
-						(parseFloat(cs.borderTopWidth) > 0) || (parseFloat(cs.borderBottomWidth) > 0);
-					return painted && (r.height < window.innerHeight * 0.8);
-				};
-				let max = 0;
-				for (const el of all) {
-					if (el.childElementCount || fixed.some(f => f.contains(el))) {
-						continue;
-					}
-					const r = el.getBoundingClientRect();
-					if ((r.height > 0) && (r.width > 0) && (getComputedStyle(el).visibility !== 'hidden') && shows(el, r)) {
-						max = Math.max(max, r.bottom);
-					}
-				}
-				return Math.ceil(max);
-			});
 			const cut = Math.min(height, Math.max(320, bottom + 48));
 			if (cut < height) {
 				height = cut;
@@ -492,8 +623,15 @@ async function render (opts) {
 				await page.waitForTimeout(200);
 			}
 		}
+		// The picture holds the whole object only if it reaches the content's end.
+		const complete = !truncated && (bottom <= height + 1);
 
-		const layout = await page.evaluate(layoutReport);
+		const layout = await page.evaluate(layoutReport, { objectId, expandIds, captureHeight: height, bottom });
+		const unsettled = [
+			...(networkIdle ? [] : [ 'network' ]),
+			...(fonts ? [] : [ 'fonts' ]),
+			...(layout.images_loading.length ? [ 'images' ] : []),
+		];
 		if (opts.debug) {
 			// The lowest leaf elements: what the height crop measured.
 			layout.debug_lowest = await page.evaluate(() => [...document.querySelectorAll('#page *')]
@@ -510,7 +648,7 @@ async function render (opts) {
 		return {
 			image: image.toString('base64'),
 			mime: format === 'png' ? 'image/png' : 'image/jpeg',
-			width, height, truncated, theme,
+			width, height, truncated, complete, unsettled, theme,
 			ms: Date.now() - t0,
 			renderer: VERSION,
 			layout,

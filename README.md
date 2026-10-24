@@ -96,26 +96,38 @@ the MCP server's heart pin and the matching frontend follow from it.
    stable anytype-ts release whose `middleware.version` has the same
    major.minor.
 2. `scripts/build.sh <ref> test`
-3. Run the test image in the foreground: `AR_TAG=test scripts/run-anytype-render.sh`
-   (stop the production daemon first).
-4. `scripts/smoke.sh` creates LIVETEST objects with the MCP live-test harness
-   (a page with table, toggle and callout; a narrow table; page columns, a link
-   and a relation; an image; an embedded query; a query object), renders each
-   and checks: login, no refused call, nothing reached outside localhost, no
-   request past the proxy, every content block in the DOM, `block-list`
-   unchanged, the MCP usable meanwhile, a wrong id failing. Only the objects it
-   created are erased afterwards.
+3. Run the test image next to the production daemon, on its own name and
+   ports: `AR_TAG=test AR_NAME=anytype-render-test AR_APP_PORT=31098
+   AR_API_PORT=31099 scripts/run-anytype-render.sh`. With `AR_DEV_SRC=1` this
+   checkout's `service/src` is mounted over the image's, so while working on
+   the daemon a `docker restart anytype-render-test` replaces a rebuild.
+4. `AR_NAME=anytype-render-test AR_API_PORT=31099 scripts/smoke.sh` creates
+   LIVETEST objects with the MCP live-test harness — a page with table, toggle
+   and callout (also in a 400 px window); a narrow table; nested toggles and a
+   toggle heading; an empty page; page columns, a link and a relation; an
+   image; a PDF; a page in the bin; an embedded query; a query object; a query
+   that matches nothing; a collection of 14 (also in a 400 px window) and the
+   same collection embedded — renders each and checks: login, no refused call,
+   nothing reached outside localhost, no request past the proxy, every content
+   block in the DOM, `block-list` unchanged, the MCP usable meanwhile, a wrong
+   id failing, and the layout report per kind (table widths, grid rows shown
+   and in total, cut-off cells, toggles open, images loaded, `complete`).
+   Only the objects it created are erased afterwards.
 5. On a refused call: **do not just allow it.** Read its handler in heart. A
    read goes into `ALLOW`; a global or persistent write goes into `LOCAL` or
    stays refused, and that part of the render is missing.
-6. When green: `docker tag anytype-render:<ref> anytype-render:local` and
-   restart the unit.
+6. When green, build the image from the committed tree and switch to it:
+   `docker build --build-context web=build/web-<ref> -t anytype-render:<tag> service`,
+   `docker tag anytype-render:<tag> anytype-render:local`, restart the unit.
 
 What an update can break, and the smoke test shows: the init script depends on
 internal frontend names (`getTab`, `storeGet`, the storage keys `accountId`,
-`hideSidebar`, `space.toggle`, `onboarding`), the report on the table classes
-(`.scrollWrap`, `.table`, `.row`, `.cell`), and readiness detection on the
-`pageMain…` page classes.
+`hideSidebar`, `space.toggle`, `onboarding`); the report on the table classes
+(`.scrollWrap`, `.table`, `.row`, `.cell`), the dataview classes
+(`.blockDataview`, `.viewContent`, `.viewGrid`, `.isCollection`, `.rowHead`,
+`.cellHead`, `.cell-key-…`, `#record-…`), the toggle class `isToggled`, and
+the record store under `window.Anytype.Lib.S` for row totals; readiness
+detection on the `pageMain…` page classes.
 
 ## Upstream quirks
 
@@ -132,14 +144,42 @@ internal frontend names (`getTab`, `storeGet`, the storage keys `accountId`,
 - On a space id that does not open, the frontend quietly shows another object.
   The proxy records whether the requested object itself was opened without
   error, and the render fails otherwise.
+- A query's or collection's own page virtualizes its grid: only the rows in
+  the window are in the DOM. The content height therefore includes the
+  virtualized list's full extent, so a short window reports `complete: false`.
+- Embedded views show a page of rows (10 by default) and a "load more"
+  button; `rows_shown` and `rows_total` make that visible.
+- An object in the bin opens read-only, with the bin banner at the top.
 
 ## Layout report
 
-Per render: `layout` (edit, set, …), `content_width_px`, `height_px`, per table
-the rendered column widths, `cut_off` (wider than the page), `cells_wrapped`,
-`cells_clipped`, plus `clipped_blocks` and `images_failed`. With `"debug": true`
-in the request it also lists the lowest visible elements (`debug_lowest`),
-useful when height detection stops fitting after an update.
+Per render, next to the image:
+
+- `complete`: whether the image reaches the end of the content. `false` for
+  the first screen of a longer object (`full_height: false`) and past
+  `MAX_HEIGHT` (then `truncated` too).
+- `unsettled`: what was still loading when the picture was taken — `network`
+  (no quiet moment within 10 s), `fonts` (3 s), `images` (8 s, only images
+  inside the captured area count; lazy ones below it never load).
+- `layout`: the page kind (`edit`, `set`, `collection`, …), `content_width_px`,
+  and `content_height_px`, the bottom of the lowest visible element.
+  `#page.scrollHeight` is not used for it: it includes the editor's bottom
+  padding and never drops below the window.
+- `tables` (table blocks): rendered column widths, `width_px`,
+  `visible_width_px`, `cut_off` (wider than the page), `cells_wrapped`,
+  `cells_clipped` and the first ten `clipped_cells` as row and column.
+- `dataviews` (queries and collections, embedded or the object itself):
+  `kind` (query or collection), `view` (grid, list, gallery, board, …),
+  `rows_shown` (in the image) and `rows_total` (from the frontend's record
+  store); for a grid also `columns` (name, width), `width_px`,
+  `visible_width_px`, `cut_off`, and `cells_truncated` with the first ten
+  `truncated_cells` (row, column name) — or `cells_wrapped` when the view has
+  "wrap content" on.
+- `clipped_blocks`, `images_failed` and `images_loading` as block ids, and
+  `toggles_not_open`: ids asked to open that are shown closed.
+
+With `"debug": true` in the request it also lists the lowest visible elements
+(`debug_lowest`), useful when height detection stops fitting after an update.
 
 ## License
 

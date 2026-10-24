@@ -9,6 +9,9 @@ live-test harness, renders each through the daemon's API, and checks:
   - every content block from block-list has a DOM node
   - block-list of each page is identical before and after rendering
   - MCP calls keep working while the renderer is busy
+  - the layout report per kind: table widths, query and collection grids
+    with their rows and cut-off cells, toggles opened, images loaded, and
+    whether the picture holds the whole object
 
 Only ids created here are erased afterwards (the harness's narrow cleanup).
 Run after every frontend update: scripts/smoke.sh.
@@ -31,20 +34,21 @@ from harness import IN_ROOT, Client, Suite  # noqa: E402
 import run as livetest_run  # noqa: E402
 
 DAEMON = os.environ.get("AR_NAME", "anytype-render")
+API_PORT = os.environ.get("AR_API_PORT", "31097")
 OUT = pathlib.Path(os.environ.get("AR_SMOKE_OUT", pathlib.Path(__file__).resolve().parent.parent / "out"))
 EXPECTED_BLOCKED = {"https://sentry.anytype.io"}
 STRUCTURAL = {"smartblock", "layout", "table_column", "table_row"}
 
 FETCH = (
     'let d="";process.stdin.on("data",c=>d+=c).on("end",async()=>{'
-    'const r=await fetch("http://127.0.0.1:31097/render",{method:"POST",body:d});'
+    'const r=await fetch("http://127.0.0.1:"+process.env.API_PORT+"/render",{method:"POST",body:d});'
     'process.stdout.write(JSON.stringify({status:r.status,body:await r.json()}))})'
 )
 
 
 def render(request):
     proc = subprocess.run(
-        ["docker", "exec", "-i", DAEMON, "node", "-e", FETCH],
+        ["docker", "exec", "-i", "-e", f"API_PORT={API_PORT}", DAEMON, "node", "-e", FETCH],
         input=json.dumps(request), capture_output=True, text=True, timeout=180,
     )
     if proc.returncode != 0:
@@ -63,15 +67,75 @@ def write_png(path, size=96, rgb=(90, 140, 200)):
                      + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
+def write_pdf(path, text="Render-Smoke PDF"):
+    """A one-page PDF with a line of text, xref offsets computed."""
+    stream = f"BT /F1 24 Tf 72 720 Td ({text}) Tj ET".encode()
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    path.write_bytes(bytes(out))
+
+
+def stage_file_block(s, obj, kind, name, writer):
+    staged = pathlib.Path(IN_ROOT) / name
+    writer(staged)
+    try:
+        s.c.call("block-file-create", space_id=s.space_id, object_id=obj, kind=kind, staged_path=staged.name)
+    finally:
+        staged.unlink(missing_ok=True)
+    for b in s.blocks(obj):
+        if b.get("kind") == "file" and b.get("target_object_id"):
+            s.track(b["target_object_id"])
+
+
+def expect(**checks):
+    """A check on the response body: each value maps the body to (ok, detail)."""
+    def run(body):
+        out = []
+        for name, fn in checks.items():
+            try:
+                ok, detail = fn(body)
+            except Exception as exc:  # noqa: BLE001
+                ok, detail = False, f"{type(exc).__name__}: {exc}"
+            if not ok:
+                out.append(f"{name}: {json.dumps(detail, ensure_ascii=False)[:300]}")
+        return out
+    return run
+
+
+def lay(body):
+    return body["layout"]
+
+
+def grid(body, i=0):
+    return lay(body)["dataviews"][i]
+
+
 def snapshot(s, obj):
     keep = ("id", "kind", "style", "text", "checked", "children_ids", "width", "width_px", "is_header")
     return [{k: b.get(k) for k in keep if b.get(k) is not None} for b in s.blocks(obj)]
 
 
 def build(s):
-    """Objects to render: (label, object_id, expand_ids, is_page)."""
+    """Objects to render: dicts with label, object id, extra request fields,
+    whether it is a page (block-list is compared), and checks on the report."""
     call, sp = s.c.call, s.space_id
     objects = []
+
+    def add(label, obj, request=None, page=True, check=None):
+        objects.append({"label": label, "obj": obj, "request": request or {}, "page": page, "check": check})
 
     basic = s.page("render basic")
     call("block-create", space_id=sp, object_id=basic, style="header1", text="Render-Smoke")
@@ -90,7 +154,18 @@ def build(s):
     ])
     call("table-column-width", space_id=sp, object_id=basic, columns=[
         {"column": 0, "width_px": 120}, {"column": 1, "width_px": 360}, {"column": 2, "width_px": 90}])
-    objects.append(("basic", basic, [toggle], True))
+    add("basic", basic, {"expand_ids": [toggle]}, check=expect(
+        widths=lambda b: (lay(b)["tables"][0]["column_widths_px"] == [120, 360, 90], lay(b)["tables"]),
+        toggle_open=lambda b: (lay(b)["toggles_not_open"] == [], lay(b)["toggles_not_open"]),
+        complete=lambda b: (b["complete"] is True, (b["complete"], b["height"], lay(b)["content_height_px"])),
+        settled=lambda b: (b["unsettled"] == [], b["unsettled"]),
+    ))
+    # The same page in a short window: the picture must say it is not all of it.
+    add("basic, first 400 px", basic, {"full_height": False, "height": 400}, check=expect(
+        incomplete=lambda b: (b["complete"] is False and lay(b)["content_height_px"] > 400,
+                              (b["complete"], lay(b)["content_height_px"])),
+    ))
+
     # The same page narrow: the long cell has to wrap there, the short ones not.
     narrow = s.page("render narrow")
     call("block-create", space_id=sp, object_id=narrow, kind="table", rows=2, columns=2)
@@ -98,7 +173,25 @@ def build(s):
         {"row": 0, "column": 0, "text": "kurz"},
         {"row": 0, "column": 1, "text": "ein deutlich längerer Zelltext, der in 140 px nicht passt"},
         {"row": 1, "column": 0, "text": "x"}, {"row": 1, "column": 1, "text": "y"}])
-    objects.append(("narrow table", narrow, [], True))
+    add("narrow table", narrow, check=expect(
+        wrapped=lambda b: (lay(b)["tables"][0]["cells_wrapped"] == 1, lay(b)["tables"]),
+    ))
+
+    nested = s.page("render nested toggles")
+    outer = call("block-create", space_id=sp, object_id=nested, style="toggle", text="Toggle A")["block_id"]
+    call("block-create", space_id=sp, object_id=nested, target_id=outer, position="inner", text="Text in A")
+    inner = call("block-create", space_id=sp, object_id=nested, target_id=outer, position="inner", style="toggle", text="Toggle A.1")["block_id"]
+    call("block-create", space_id=sp, object_id=nested, target_id=inner, position="inner", text="Text in A.1")
+    heading = call("block-create", space_id=sp, object_id=nested, style="toggle_header2", text="Toggle B")["block_id"]
+    call("block-create", space_id=sp, object_id=nested, target_id=heading, position="inner", text="Text in B")
+    add("nested toggles", nested, {"expand_ids": [outer, inner, heading]}, check=expect(
+        all_open=lambda b: (lay(b)["toggles_not_open"] == [], lay(b)["toggles_not_open"]),
+    ))
+
+    empty = s.page("render empty")
+    add("empty page", empty, check=expect(
+        complete=lambda b: (b["complete"] is True, (b["complete"], b["height"], lay(b)["content_height_px"])),
+    ))
 
     columns = s.page("render columns")
     left = call("block-create", space_id=sp, object_id=columns, text="Linke Spalte")["block_id"]
@@ -107,27 +200,70 @@ def build(s):
     call("block-column-width", space_id=sp, object_id=columns, block_id=left, widths=[2, 1])
     call("block-create", space_id=sp, object_id=columns, kind="link", linked_object_id=basic)
     call("block-relation-add", space_id=sp, object_id=columns, property_key="createdDate")
-    objects.append(("columns+link+relation", columns, [], True))
+    add("columns+link+relation", columns)
 
     media = s.page("render media")
-    staged = pathlib.Path(IN_ROOT) / "livetest render bild.png"
-    write_png(staged)
-    try:
-        call("block-file-create", space_id=sp, object_id=media, kind="image", staged_path=staged.name)
-    finally:
-        staged.unlink(missing_ok=True)
-    for b in s.blocks(media):
-        if b.get("kind") == "file" and b.get("target_object_id"):
-            s.track(b["target_object_id"])
-    objects.append(("image", media, [], True))
+    stage_file_block(s, media, "image", "livetest render bild.png", write_png)
+    add("image", media, check=expect(
+        loaded=lambda b: (lay(b)["images_failed"] == [] and lay(b)["images_loading"] == [],
+                          (lay(b)["images_failed"], lay(b)["images_loading"], b["unsettled"])),
+    ))
+
+    pdf = s.page("render pdf")
+    stage_file_block(s, pdf, "pdf", "livetest render dokument.pdf", write_pdf)
+    add("pdf embed", pdf, check=expect(
+        settled=lambda b: (b["unsettled"] == [], b["unsettled"]),
+    ))
+
+    archived = s.page("render archived")
+    call("block-create", space_id=sp, object_id=archived, text="Im Papierkorb")
+    s.settle(1)
+    call("object-set-archived", space_id=sp, object_ids=[archived], archived=True)
+    add("archived page", archived, page=False)
 
     page_type = s.type_by_key("page")
     query = call("query-create", space_id=sp, name=s.probe("render query"), source=[page_type["id"]])["object_id"]
     s.track(query)
     embed = s.page("render embedded query")
     call("block-embed-query", space_id=sp, object_id=embed, query_object_id=query)
-    objects.append(("embedded query", embed, [], True))
-    objects.append(("query object", query, [], False))
+    add("embedded query", embed, check=expect(
+        grid=lambda b: (grid(b)["kind"] == "query" and grid(b)["view"] == "grid" and grid(b)["columns"], lay(b)["dataviews"]),
+    ))
+    add("query object", query, page=False, check=expect(
+        layout=lambda b: (lay(b)["layout"] == "set", lay(b)["layout"]),
+        grid=lambda b: (grid(b)["kind"] == "query" and grid(b)["view"] == "grid" and grid(b)["rows_total"] >= 1, lay(b)["dataviews"]),
+    ))
+
+    nothing = call("query-create", space_id=sp, name=s.probe("render empty query"), source=[page_type["id"]])["object_id"]
+    s.track(nothing)
+    view = (call("query-inspect", space_id=sp, object_id=nothing).get("views") or [{}])[0].get("id")
+    call("query-filter-add", space_id=sp, object_id=nothing, view_id=view, property_key="name",
+         condition="equal", value="kein Objekt heisst so")
+    add("empty query", nothing, page=False, check=expect(
+        empty=lambda b: (grid(b)["rows_total"] == 0 and grid(b)["rows_shown"] == 0, lay(b)["dataviews"]),
+    ))
+
+    # A collection of 14, one with a name too long for its column.
+    items = [s.page(f"eintrag {i}") for i in range(13)]
+    items.append(s.page("ein Eintrag mit einem Namen, der für die Namensspalte der Tabelle eindeutig zu lang ist"))
+    coll = call("object-to-collection", space_id=sp, object_id=s.page("render collection"))["object_id"]
+    call("add-list-objects", space_id=sp, list_id=coll, objects=items)
+    add("collection", coll, page=False, check=expect(
+        layout=lambda b: (lay(b)["layout"] == "collection", lay(b)["layout"]),
+        rows=lambda b: (grid(b)["kind"] == "collection" and grid(b)["rows_total"] == 14 and grid(b)["rows_shown"] == 14, lay(b)["dataviews"]),
+        truncated=lambda b: (13 in [c["row"] for c in grid(b).get("truncated_cells", [])] or grid(b).get("cells_truncated", 0) > 10,
+                             lay(b)["dataviews"]),
+        complete=lambda b: (b["complete"] is True, (b["complete"], b["height"], lay(b)["content_height_px"])),
+    ))
+    # Its grid is virtualized: a short window holds a few rows, the rest is not in the DOM.
+    add("collection, first 400 px", coll, {"full_height": False, "height": 400}, page=False, check=expect(
+        incomplete=lambda b: (b["complete"] is False and grid(b)["rows_shown"] < 14, (b["complete"], lay(b)["dataviews"])),
+    ))
+    embed_coll = s.page("render embedded collection")
+    call("block-embed-query", space_id=sp, object_id=embed_coll, query_object_id=coll)
+    add("embedded collection", embed_coll, check=expect(
+        more=lambda b: (grid(b)["rows_total"] == 14 and grid(b)["rows_shown"] < 14, lay(b)["dataviews"]),
+    ))
 
     s.settle(3)
     return objects
@@ -139,7 +275,8 @@ def main():
     s = Suite(client, "render-smoke")
     results, failures, refused_all = [], [], set()
     try:
-        for label, obj, expand, is_page in build(s):
+        for item in build(s):
+            label, obj, is_page = item["label"], item["obj"], item["page"]
             before = snapshot(s, obj) if is_page else None
 
             during = {}
@@ -154,14 +291,14 @@ def main():
 
             th = threading.Thread(target=probe)
             th.start()
-            res = render({"space_id": s.space_id, "object_id": obj, "width": 1100, "expand_ids": expand})
+            res = render({"space_id": s.space_id, "object_id": obj, "width": 1100, **item["request"]})
             th.join()
             body = res["body"]
             if res["status"] != 200:
                 failures.append(f"{label}: render failed ({res['status']}): {body.get('error')}")
                 continue
 
-            name = label.replace(" ", "_").replace("+", "_")
+            name = "".join(ch if ch.isalnum() else "_" for ch in label)
             (OUT / f"{name}.jpg").write_bytes(base64.b64decode(body["image"]))
             body.pop("image")
             (OUT / f"{name}.json").write_text(json.dumps(body, indent=1, ensure_ascii=False))
@@ -178,6 +315,8 @@ def main():
                 failures.append(f"{label}: {body['direct_heart_requests']} requests went to heart past the proxy")
             if not during.get("ok"):
                 failures.append(f"{label}: MCP call during render failed {during}")
+            if item["check"]:
+                failures.extend(f"{label}: {f}" for f in item["check"](body))
             if is_page:
                 content = [b for b in s.blocks(obj) if b.get("kind") not in STRUCTURAL]
                 if dom < len(content):
@@ -187,9 +326,11 @@ def main():
                     failures.append(f"{label}: block-list changed by rendering")
             results.append({
                 "object": label, "ms": body["ms"], "size": f"{body['width']}x{body['height']}",
+                "complete": body["complete"], "unsettled": body["unsettled"],
                 "layout": body["layout"]["layout"], "refused": refused,
                 "local": body["rpc"]["answered_locally"], "page_errors": len(body["page_errors"]),
-                "tables": body["layout"]["tables"], "images_failed": body["layout"]["images_failed"],
+                "tables": body["layout"]["tables"], "dataviews": body["layout"]["dataviews"],
+                "images_failed": body["layout"]["images_failed"],
                 "methods": sorted(body["rpc"].get("methods", {})),
             })
     finally:
