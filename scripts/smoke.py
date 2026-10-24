@@ -251,8 +251,10 @@ def build(s):
     add("collection", coll, page=False, check=expect(
         layout=lambda b: (lay(b)["layout"] == "collection", lay(b)["layout"]),
         rows=lambda b: (grid(b)["kind"] == "collection" and grid(b)["rows_total"] == 14 and grid(b)["rows_shown"] == 14, lay(b)["dataviews"]),
-        truncated=lambda b: (13 in [c["row"] for c in grid(b).get("truncated_cells", [])] or grid(b).get("cells_truncated", 0) > 10,
-                             lay(b)["dataviews"]),
+        # Every name is long (LIVETEST prefix), the type column is not: one cut
+        # cell per row, all in Name, none elsewhere.
+        truncated=lambda b: (grid(b)["cells_truncated"] == grid(b)["rows_shown"]
+                             and {c["column"] for c in grid(b)["truncated_cells"]} == {"Name"}, lay(b)["dataviews"]),
         complete=lambda b: (b["complete"] is True, (b["complete"], b["height"], lay(b)["content_height_px"])),
     ))
     # Its grid is virtualized: a short window holds a few rows, the rest is not in the DOM.

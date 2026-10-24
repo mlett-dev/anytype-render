@@ -394,7 +394,9 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 		const id = block.id.slice('block-'.length);
 		const content = block.querySelector('.viewContent');
 		const view = [...(content?.classList || [])].map(c => /^view(Grid|Board|Gallery|List|Calendar|Graph|Timeline)$/.exec(c)?.[1]).find(Boolean)?.toLowerCase() || null;
-		const records = [...block.querySelectorAll('[id^="record-"]')];
+		// Every view type marks its rows or cards record-<id>; a board's
+		// "new card" placeholder is record-<column>-add.
+		const records = [...block.querySelectorAll('[id^="record-"]')].filter(el => !el.id.endsWith('-add'));
 		const out = {
 			block_id: id,
 			kind: block.querySelector('.isCollection') ? 'collection' : 'query',
