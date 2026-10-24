@@ -1,0 +1,19 @@
+# User unit. Copy to ~/.config/systemd/user/, set ExecStart, then
+#   systemctl --user daemon-reload && systemctl --user enable --now anytype-render
+# The daemon exits when heart becomes unreachable (anytype-cli restarted, its
+# network namespace gone) or stops accepting the token; Restart=always brings
+# it back with a fresh token in the new namespace.
+[Unit]
+Description=anytype-render: Anytype objects rendered with the real frontend, for anytype-extension-mcp
+After=docker.service
+
+[Service]
+Type=simple
+# Point this at your checkout before installing the unit.
+ExecStart=/path/to/anytype-render/scripts/run-anytype-render.sh
+ExecStop=/usr/bin/docker stop -t 10 anytype-render
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

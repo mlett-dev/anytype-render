@@ -1,0 +1,8 @@
+build/
+node_modules/
+# Smoke-test renders and reports carry real object and space ids.
+out/
+# Installation-specific values and the local deny list for check-private.
+local.env
+.private-patterns
+__pycache__/
