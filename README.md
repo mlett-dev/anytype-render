@@ -198,7 +198,16 @@ Per render, next to the image:
   for a query the types it lists, `query_of`); the active view's `view_name`;
   `filters`, the filters the GUI applies (lib/relation.ts `isFilterActive`),
   `filters_inactive` for stored ones without a value, which the bar shows but
-  which filter nothing, and `sorts`; `filter_bar` when the filter bar is open;
+  which filter nothing, `filters_ignored` for filters on a deleted or archived
+  property, which the GUI drops without a trace, and `sorts` (with
+  `sorts_ignored` likewise); `filter_list` and `sort_list`, every filter and
+  sort in words as the GUI labels it ("Tags: Contains all Red, Green", a
+  group as "OR group: (…) or (…)"), with values by name and a note on each
+  one that filters nothing, is ignored or names a value that does not exist
+  (a deleted tag keeps its name and is marked "(deleted)"); the chips in the
+  image are cut at a fixed width and show a group only as "N rules", the list
+  is not. Names a group's rules need are looked up with `ObjectSearch`, a
+  read. `filter_bar` when the filter bar is open;
   `views`, the names of all of them, when there are several; `rows_shown` (in the image), `rows_loaded`
   and `rows_total` (from the frontend's record store), and `load_more` when
   the view shows a "Load more" button; `in_image: false` when the block lies outside the picture;

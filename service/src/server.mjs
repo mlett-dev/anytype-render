@@ -334,6 +334,109 @@ function contentBottom () {
 // table/cell.tsx) and dataview views (component/block/dataview.tsx,
 // dataview/view/grid*), whose grid wraps in a .scrollWrap as well.
 function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
+	// Filters as words, the way the GUI labels them (lib/relation.ts
+	// filterConditionsByType and the chip in dataview/filter, v0.56.1), with
+	// what the GUI makes of each: applied, filtering nothing, or ignored.
+	const describeFilters = (filters, { objectId, rel, exists, active, advanced }) => {
+		const { I, S, translate: t } = window.Anytype.Lib;
+		const C = I.FilterCondition;
+		const T = I.RelationType;
+		const Q = I.FilterQuickOption;
+		const names = window.__arFilterNames || {};
+		const labelKeys = {
+			date: { [C.Equal]: 'filterConditionEqual', [C.Greater]: 'filterConditionGreaterDate', [C.Less]: 'filterConditionLessDate',
+				[C.GreaterOrEqual]: 'filterConditionGreaterOrEqualDate', [C.LessOrEqual]: 'filterConditionLessOrEqualDate', [C.In]: 'filterConditionInDate' },
+			list: { [C.In]: 'filterConditionInArray', [C.AllIn]: 'filterConditionAllIn', [C.NotIn]: 'filterConditionNotInArray', [C.Equal]: 'filterConditionEqual' },
+			text: { [C.Like]: 'filterConditionLike', [C.NotLike]: 'filterConditionNotLike', [C.Equal]: 'filterConditionEqual', [C.NotEqual]: 'filterConditionNotEqual' },
+		};
+		const symbols = { [C.Equal]: '=', [C.NotEqual]: '≠', [C.Greater]: '>', [C.Less]: '<', [C.GreaterOrEqual]: '≥', [C.LessOrEqual]: '≤' };
+		const listFormats = [ T.Select, T.MultiSelect, T.Object, T.File, T.Relations ];
+		// Conditions the GUI menu does not offer keep their own name (ExactIn).
+		const conditionLabel = (format, c) => {
+			if ((c == C.Empty) || (c == C.NotEmpty)) {
+				return t((c == C.Empty) ? 'filterConditionEmpty' : 'filterConditionNotEmpty');
+			}
+			// heart's Exists (17) is not in the frontend's enum at all.
+			const own = C[c] || ((c == 17) ? 'Exists' : `condition ${c}`);
+			if (format == T.Number) {
+				return symbols[c] || own;
+			}
+			const table = (format == T.Date) ? labelKeys.date : (listFormats.includes(format) ? labelKeys.list : labelKeys.text);
+			return table[c] ? t(table[c]) : own;
+		};
+		const iso = n => new Date(n * 1000).toISOString().slice(0, 10);
+		let unknown = 0;
+		const valueText = (f, r) => {
+			if ([ C.Empty, C.NotEmpty ].includes(f.condition)) {
+				return '';
+			}
+			const format = r?.format;
+			const value = f.value;
+			if (format == T.Date) {
+				const q = f.quickOption || Q.ExactDate;
+				if ((q != Q.ExactDate) && (q != Q.NumberOfDaysAgo) && (q != Q.NumberOfDaysNow)) {
+					return t(`quickOption${q}`);
+				}
+				if (q != Q.ExactDate) {
+					return `${value} (${t(`quickOption${q}`)})`;
+				}
+				if (typeof value === 'string') {
+					return `"${value}" (text, which the GUI reads as ${iso(parseFloat(value) || 0)})`;
+				}
+				return ((value === null) || (value === undefined)) ? '' : iso(Number(value));
+			}
+			if (format == T.Checkbox) {
+				return value ? 'checked' : 'unchecked';
+			}
+			if (listFormats.includes(format)) {
+				const ids = (Array.isArray(value) ? value : [ value ]).filter(x => (x !== null) && (x !== undefined) && (x !== ''));
+				return ids.map((id) => {
+					const template = /^_filter_template_(\d+)_$/.exec(String(id));
+					if (template) {
+						return t(`filterTemplate${template[1]}`);
+					}
+					const d = S.Detail.get(objectId, id, [ 'name', 'isArchived', 'isDeleted' ], true);
+					const name = (d && !d._empty_ && (d.name !== undefined)) ? d.name : names[id];
+					if (name === undefined) {
+						unknown++;
+						return `unknown (${String(id).slice(-6)})`;
+					}
+					// A deleted tag is only archived and keeps its name, which
+					// the GUI goes on showing; it matches nothing any more.
+					if (d && !d._empty_ && (d.isArchived || d.isDeleted)) {
+						unknown++;
+						return `${name || t('defaultNamePage')} (deleted)`;
+					}
+					return name || t('defaultNamePage');
+				}).join(', ');
+			}
+			if ((value === null) || (value === undefined)) {
+				return '';
+			}
+			return (format == T.Number) ? String(value) : `"${value}"`;
+		};
+		const describe = (f) => {
+			if (!f.relationKey && advanced(f)) {
+				const word = (f.operator == I.FilterOperator.Or) ? 'or' : 'and';
+				const rules = (f.nestedFilters || []).map(n => `(${describe(n)})`).join(` ${word} `);
+				return `${word.toUpperCase()} group: ${rules}${active(f) ? '' : ' [filters nothing: no rule has a value]'}`;
+			}
+			const r = rel(f.relationKey);
+			const before = unknown;
+			const value = valueText(f, r);
+			let text = `${r?.name || f.relationKey}: ${conditionLabel(r?.format, f.condition)}${value ? ` ${value}` : ''}`;
+			if (!exists(r)) {
+				text += ' [ignored: the property is deleted]';
+			} else if (!active(f)) {
+				text += ' [filters nothing: no value]';
+			} else if (unknown > before) {
+				text += ' [a value names nothing that exists]';
+			}
+			return text;
+		};
+		return filters.filter(Boolean).map(describe);
+	};
+
 	const page = document.querySelector('#page');
 	const wrapper = document.querySelector('.editorWrapper');
 	const blockId = el => el.closest('[id^="block-"]')?.id.slice('block-'.length) || null;
@@ -474,7 +577,32 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 				if (shown.length > applied) {
 					out.filters_inactive = shown.length - applied;
 				}
+				// On a deleted or archived property the GUI drops a filter or
+				// sort without a trace, while the REST list endpoint applies it.
+				const ignored = (v.filters || []).filter(f => f && !advanced(f) && !exists(rel(f.relationKey))).length;
+				if (ignored) {
+					out.filters_ignored = ignored;
+				}
 				out.sorts = (v.sorts || []).filter(x => x && exists(rel(x.relationKey))).length;
+				const sortsIgnored = (v.sorts || []).filter(x => x && !exists(rel(x.relationKey))).length;
+				if (sortsIgnored) {
+					out.sorts_ignored = sortsIgnored;
+				}
+				// The filters and sorts in words, as the GUI labels them. The
+				// image cuts a chip at a fixed width and shows a group only as
+				// "N rules"; this says what each one does.
+				const list = describeFilters(v.filters || [], { objectId, rel, exists, active, advanced });
+				if (list.length) {
+					out.filter_list = list;
+				}
+				const sortList = (v.sorts || []).filter(Boolean).map((x) => {
+					const r = rel(x.relationKey);
+					const dir = (x.type == I.SortType.Desc) ? 'descending' : ((x.type == I.SortType.Custom) ? 'custom order' : 'ascending');
+					return `${r?.name || x.relationKey}: ${dir}${exists(r) ? '' : ' [ignored: the property is deleted]'}`;
+				});
+				if (sortList.length) {
+					out.sort_list = sortList;
+				}
 			}
 			const all = S.Record.getViews(objectId, id);
 			if (all.length > 1) {
@@ -660,6 +788,43 @@ function filterBarButtons ({ objectId }) {
 		}
 	}
 	return out;
+}
+
+// loadFilterNames looks up the names of filter values the store does not hold
+// (a deleted tag stays unknown: the search leaves out deleted and archived
+// objects, as the GUI does) and leaves them in window.__arFilterNames.
+function loadFilterNames ({ objectId, spaceId }) {
+	const { S, C, I } = window.Anytype.Lib;
+	const ids = new Set();
+	const walk = fs => (fs || []).forEach((f) => {
+		(Array.isArray(f?.value) ? f.value : [ f?.value ]).forEach((x) => {
+			if ((typeof x === 'string') && /^bafy/.test(x) && S.Detail.get(objectId, x, [ 'name' ], true)._empty_) {
+				ids.add(x);
+			}
+		});
+		walk(f?.nestedFilters);
+	});
+	for (const block of document.querySelectorAll('.block.blockDataview')) {
+		const id = block.id.slice('block-'.length);
+		const meta = S.Record.getMeta(S.Record.getSubId(objectId, id), '');
+		walk((S.Record.getView(objectId, id, meta.viewId) || S.Record.getViews(objectId, id)[0])?.filters);
+	}
+	if (!ids.size) {
+		return Promise.resolve();
+	}
+	const list = [ ...ids ];
+	return new Promise((resolve) => {
+		const timer = setTimeout(resolve, 3000);
+		C.ObjectSearch(spaceId, [ { relationKey: 'id', condition: I.FilterCondition.In, value: list } ], [], [ 'id', 'name' ], '', 0, list.length, (message) => {
+			const names = {};
+			(message?.records || []).forEach((r) => {
+				names[r.id] = r.name || '';
+			});
+			window.__arFilterNames = names;
+			clearTimeout(timer);
+			resolve();
+		});
+	});
 }
 
 function closeMenus () {
@@ -899,6 +1064,9 @@ async function render (opts) {
 		// The picture holds the whole object only if it reaches the content's end.
 		const complete = !truncated && (bottom <= height + 1);
 
+		// Names of the tags and objects that filters name but the page did not
+		// load, rules inside a filter group above all. ObjectSearch is a read.
+		await page.evaluate(loadFilterNames, { objectId, spaceId }).catch(() => {});
 		const layout = await page.evaluate(layoutReport, { objectId, expandIds, captureHeight: height, bottom });
 		const unsettled = [
 			...(networkIdle ? [] : [ 'network' ]),

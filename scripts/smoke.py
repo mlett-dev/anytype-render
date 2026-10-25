@@ -281,13 +281,22 @@ def build(s):
     call("query-filter-add", space_id=sp, object_id=nothing, view_id=view, property_key="name",
          condition="equal", value="kein Objekt heisst so")
     # A second filter without a value: stored, shown in the bar, applied by
-    # nobody. The report counts the applied one only.
-    call("query-filter-add", space_id=sp, object_id=nothing, view_id=view, property_key="description",
-         condition="equal", value="")
+    # nobody. The report counts the applied one only. The MCP refuses a new
+    # filter without a value, so it is added with one and then emptied by id,
+    # which is how the GUI leaves such filters behind.
+    emptied = call("query-filter-add", space_id=sp, object_id=nothing, view_id=view, property_key="description",
+                   condition="equal", value="x")["filter_id"]
+    stored = (call("query-inspect", space_id=sp, object_id=nothing).get("views") or [{}])[0].get("filters") or []
+    call("query-view-update", space_id=sp, object_id=nothing, view_id=view,
+         filters=[dict(f, value="") if f["id"] == emptied else f for f in stored])
     add("empty query", nothing, page=False, check=expect(
         empty=lambda b: (grid(b)["rows_total"] == 0 and grid(b)["rows_shown"] == 0, lay(b)["dataviews"]),
         filters=lambda b: (grid(b)["filters"] == 1 and grid(b)["filters_inactive"] == 1 and "filter_bar" not in grid(b),
                            lay(b)["dataviews"]),
+        # The filters in words, as the GUI labels them, the inactive one marked.
+        listed=lambda b: (grid(b).get("filter_list", [None])[0] == 'Name: Is "kein Objekt heisst so"'
+                          and "[filters nothing" in (grid(b).get("filter_list") or ["", ""])[1],
+                          grid(b).get("filter_list")),
     ))
     add("empty query, filter bar open", nothing, {"show_filters": True}, page=False, check=expect(
         bar=lambda b: (grid(b).get("filter_bar") is True, lay(b)["dataviews"]),
