@@ -277,7 +277,10 @@ def build(s):
         # Every name is long (LIVETEST prefix), the type column is not: one cut
         # cell per row, all in Name, none elsewhere.
         truncated=lambda b: (grid(b)["cells_truncated"] == grid(b)["rows_shown"]
-                             and {c["column"] for c in grid(b)["truncated_cells"]} == {"Name"}, lay(b)["dataviews"]),
+                             and {c["name"] for c in grid(b)["columns"] if c.get("cells_truncated")} == {"Name"}, lay(b)["dataviews"]),
+        # The width the longest name needs is more than the column has.
+        needs=lambda b: (all(c["needs_px"] > c["width_px"] for c in grid(b)["columns"] if c.get("cells_truncated")),
+                         grid(b)["columns"]),
         complete=lambda b: (b["complete"] is True, (b["complete"], b["height"], lay(b)["content_height_px"])),
     ))
     # Its grid is virtualized: a short window holds a few rows, the rest is not in the DOM.
@@ -287,13 +290,27 @@ def build(s):
     embed_coll = s.page("render embedded collection")
     call("block-embed-query", space_id=sp, object_id=embed_coll, query_object_id=coll)
     add("embedded collection", embed_coll, check=expect(
-        more=lambda b: (grid(b)["rows_total"] == 14 and grid(b)["rows_shown"] < 14, lay(b)["dataviews"]),
+        more=lambda b: (grid(b)["rows_total"] == 14 and grid(b)["rows_shown"] == grid(b)["rows_loaded"] < 14, lay(b)["dataviews"]),
         source=lambda b: (grid(b)["source_id"] == coll and "render collection" in grid(b)["source_name"]
                           and "query_of" not in grid(b), lay(b)["dataviews"]),
     ))
+    # Two embedded views on one page: switching one leaves the other alone,
+    # and in a short window the lower one is not in the picture.
+    two = s.page("render zwei eingebettete")
+    upper = call("block-embed-query", space_id=sp, object_id=two, query_object_id=query)["block_id"]
+    lower = call("block-embed-query", space_id=sp, object_id=two, query_object_id=coll)["block_id"]
+    call("query-view-create", space_id=sp, object_id=two, block_id=lower, name="Liste", layout="list")
+    by_block = lambda b, i: next(d for d in lay(b)["dataviews"] if d["block_id"] == i)
+    add("two embedded views, one switched", two, {"views": [{"block_id": lower, "view": "Liste"}]}, check=expect(
+        switched=lambda b: (by_block(b, lower)["view"] == "list" and by_block(b, upper)["view"] == "grid", lay(b)["dataviews"]),
+    ))
+    add("two embedded views, first 400 px", two, {"full_height": False, "height": 400}, check=expect(
+        outside=lambda b: (by_block(b, lower).get("in_image") is False and "in_image" not in by_block(b, upper),
+                           lay(b)["dataviews"]),
+    ))
     # Load more pressed until every row is there; the picture grows with them.
     add("embedded collection, all rows", embed_coll, {"all_rows": True}, check=expect(
-        all=lambda b: (grid(b)["rows_shown"] == grid(b)["rows_total"] == 14, lay(b)["dataviews"]),
+        all=lambda b: (grid(b)["rows_shown"] == grid(b)["rows_loaded"] == grid(b)["rows_total"] == 14, lay(b)["dataviews"]),
         complete=lambda b: (b["complete"] is True and b["unsettled"] == [], (b["complete"], b["unsettled"])),
     ))
 

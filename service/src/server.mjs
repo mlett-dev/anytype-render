@@ -438,8 +438,13 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 			if (Number.isFinite(meta.total)) {
 				out.rows_total = meta.total;
 			}
+			// Loaded, in the picture or not: the rest is behind Load more.
+			out.rows_loaded = Math.max(records.length, S.Record.getRecordIds(S.Record.getSubId(objectId, id), '').length);
 		} catch {}
 		out.rows_shown = records.filter(captured).length;
+		if (!captured(block)) {
+			out.in_image = false;
+		}
 		if ((view !== 'grid') || !content) {
 			return out;
 		}
@@ -449,9 +454,12 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 		const scroll = block.querySelector('.scroll');
 		// With "wrap content" on, cells grow instead of cutting their text.
 		const wraps = content.classList.contains('wrapContent');
-		const cut = [];
+		// Per column: how many cells cut their text, and the width the longest
+		// of them needs (the cell's width plus what its text runs over).
+		const cut = new Map();
 		let wrapped = 0;
-		records.forEach((row, r) => {
+		let truncated = 0;
+		records.forEach((row) => {
 			if (!captured(row)) {
 				return;
 			}
@@ -462,17 +470,30 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 				}
 				if (wraps) {
 					wrapped += (lines(cell) > 1) ? 1 : 0;
-				} else if ([ cell, ...cell.querySelectorAll('*') ].some(clipsX)) {
-					cut.push({ row: r, column: names.get(key) || key });
+					continue;
+				}
+				const over = Math.max(0, ...[ cell, ...cell.querySelectorAll('*') ].filter(clipsX).map(el => el.scrollWidth - el.clientWidth));
+				if (over > 0) {
+					const c = cut.get(key) || { cells: 0, needs: 0 };
+					c.cells++;
+					c.needs = Math.max(c.needs, Math.ceil(cell.getBoundingClientRect().width + over));
+					cut.set(key, c);
+					truncated++;
 				}
 			}
 		});
 		return {
 			...out,
-			columns: head.map(h => ({ name: names.get(keyOf(h)), width_px: Math.round(h.getBoundingClientRect().width) })),
+			columns: head.map((h) => {
+				const c = cut.get(keyOf(h));
+				return {
+					name: names.get(keyOf(h)), width_px: Math.round(h.getBoundingClientRect().width),
+					...(c ? { cells_truncated: c.cells, needs_px: c.needs } : {}),
+				};
+			}),
 			width_px: Math.round(content.getBoundingClientRect().width),
 			cut_off_px: hiddenX(content, scroll),
-			...(wraps ? { cells_wrapped: wrapped } : { cells_truncated: cut.length, truncated_cells: first10(cut) }),
+			...(wraps ? { cells_wrapped: wrapped } : { cells_truncated: truncated }),
 		};
 	});
 
