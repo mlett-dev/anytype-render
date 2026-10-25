@@ -9,9 +9,10 @@ live-test harness, renders each through the daemon's API, and checks:
   - every content block from block-list has a DOM node
   - block-list of each page is identical before and after rendering
   - MCP calls keep working while the renderer is busy
-  - the layout report per kind: table widths, query and collection grids
-    with their rows and cut-off cells, toggles opened, images loaded, and
-    whether the picture holds the whole object
+  - the layout report per kind: table widths and the part cut off at the
+    side, query and collection grids with their source, view, rows and
+    cut-off cells, Load more for all rows, toggles opened, images loaded,
+    whether the picture holds the whole object, and a report without image
 
 Only ids created here are erased afterwards (the harness's narrow cleanup).
 Run after every frontend update: scripts/smoke.sh.
@@ -175,6 +176,20 @@ def build(s):
         {"row": 1, "column": 0, "text": "x"}, {"row": 1, "column": 1, "text": "y"}])
     add("narrow table", narrow, check=expect(
         wrapped=lambda b: (lay(b)["tables"][0]["cells_wrapped"] == 1, lay(b)["tables"]),
+        fits=lambda b: (lay(b)["tables"][0]["cut_off_px"] == 0, lay(b)["tables"]),
+    ))
+
+    # Wider than the text column: the GUI scrolls it sideways, the report says
+    # by how much. 3 x 400 px in a 1100 px window.
+    wide = s.page("render wide table")
+    call("block-create", space_id=sp, object_id=wide, kind="table", rows=2, columns=3)
+    call("table-column-width", space_id=sp, object_id=wide, columns=[
+        {"column": c, "width_px": 400} for c in range(3)])
+    add("wide table", wide, check=expect(
+        cut=lambda b: (0 < lay(b)["tables"][0]["cut_off_px"] < lay(b)["tables"][0]["width_px"], lay(b)["tables"]),
+    ))
+    add("wide table, report only", wide, {"image": False}, check=expect(
+        no_image=lambda b: (b["image_bytes"] == 0 and lay(b)["tables"], (b["image_bytes"], lay(b)["tables"])),
     ))
 
     nested = s.page("render nested toggles")
@@ -228,6 +243,8 @@ def build(s):
     call("block-embed-query", space_id=sp, object_id=embed, query_object_id=query)
     add("embedded query", embed, check=expect(
         grid=lambda b: (grid(b)["kind"] == "query" and grid(b)["view"] == "grid" and grid(b)["columns"], lay(b)["dataviews"]),
+        source=lambda b: (grid(b)["source_id"] == query and grid(b)["query_of"] == ["Page"]
+                          and grid(b)["view_name"] and isinstance(grid(b)["filters"], int), lay(b)["dataviews"]),
     ))
     add("query object", query, page=False, check=expect(
         layout=lambda b: (lay(b)["layout"] == "set", lay(b)["layout"]),
@@ -265,6 +282,13 @@ def build(s):
     call("block-embed-query", space_id=sp, object_id=embed_coll, query_object_id=coll)
     add("embedded collection", embed_coll, check=expect(
         more=lambda b: (grid(b)["rows_total"] == 14 and grid(b)["rows_shown"] < 14, lay(b)["dataviews"]),
+        source=lambda b: (grid(b)["source_id"] == coll and "render collection" in grid(b)["source_name"]
+                          and "query_of" not in grid(b), lay(b)["dataviews"]),
+    ))
+    # Load more pressed until every row is there; the picture grows with them.
+    add("embedded collection, all rows", embed_coll, {"all_rows": True}, check=expect(
+        all=lambda b: (grid(b)["rows_shown"] == grid(b)["rows_total"] == 14, lay(b)["dataviews"]),
+        complete=lambda b: (b["complete"] is True and b["unsettled"] == [], (b["complete"], b["unsettled"])),
     ))
 
     s.settle(3)
@@ -301,8 +325,9 @@ def main():
                 continue
 
             name = "".join(ch if ch.isalnum() else "_" for ch in label)
-            (OUT / f"{name}.jpg").write_bytes(base64.b64decode(body["image"]))
-            body.pop("image")
+            image = base64.b64decode(body.pop("image"))
+            (OUT / f"{name}.jpg").write_bytes(image)
+            body["image_bytes"] = len(image)
             (OUT / f"{name}.json").write_text(json.dumps(body, indent=1, ensure_ascii=False))
 
             refused = body["rpc"]["refused"]

@@ -147,8 +147,14 @@ detection on the `pageMain…` page classes.
 - A query's or collection's own page virtualizes its grid: only the rows in
   the window are in the DOM. The content height therefore includes the
   virtualized list's full extent, so a short window reports `complete: false`.
-- Embedded views show a page of rows (10 by default) and a "load more"
-  button; `rows_shown` and `rows_total` make that visible.
+- Embedded views show a page of rows (the view's page limit, 10 by default)
+  and a "Load more" button; `rows_shown` and `rows_total` make that visible.
+  With `"all_rows": true` the daemon presses it until every row is there, up
+  to 500 per view. One press loads the offset plus twice the page limit, so
+  the daemon sets the offset in the record store first and one press does it
+  (board columns count their own offset and take one press per page). An
+  embedded view has views of its own, with their own filters: it is not the
+  query it points at opened on its own.
 - An object in the bin opens read-only, with the bin banner at the top.
 
 ## Layout report
@@ -160,21 +166,27 @@ Per render, next to the image:
   `MAX_HEIGHT` (then `truncated` too).
 - `unsettled`: what was still loading when the picture was taken — `network`
   (no quiet moment within 10 s), `fonts` (3 s), `images` (8 s, only images
-  inside the captured area count; lazy ones below it never load).
+  inside the captured area count; lazy ones below it never load), `rows`
+  (`all_rows` still pressing "Load more" after 30 s).
+- `image` is empty with `"image": false` in the request: the report alone.
 - `layout`: the page kind (`edit`, `set`, `collection`, …), `content_width_px`,
   and `content_height_px`, the bottom of the lowest visible element.
   `#page.scrollHeight` is not used for it: it includes the editor's bottom
   padding and never drops below the window.
-- `tables` (table blocks): rendered column widths, `width_px`,
-  `visible_width_px`, `cut_off` (wider than the page), `cells_wrapped`,
+- `tables` (table blocks): rendered column widths, `width_px`, `cut_off_px`
+  (the width the GUI shows only after scrolling sideways), `cells_wrapped`,
   `cells_clipped` and the first ten `clipped_cells` as row and column.
 - `dataviews` (queries and collections, embedded or the object itself):
-  `kind` (query or collection), `view` (grid, list, gallery, board, …),
-  `rows_shown` (in the image) and `rows_total` (from the frontend's record
-  store); for a grid also `columns` (name, width), `width_px`,
-  `visible_width_px`, `cut_off`, and `cells_truncated` with the first ten
-  `truncated_cells` (row, column name) — or `cells_wrapped` when the view has
-  "wrap content" on.
+  `kind` (query or collection), `view` (grid, list, gallery, board, …); for
+  an embedded view the object it points at (`source_id`, `source_name`, and
+  for a query the types it lists, `query_of`); the active view's `view_name`
+  with its `filters` and `sorts` counts; `rows_shown` (in the image) and
+  `rows_total` (from the frontend's record store); for a grid also `columns`
+  (name, width), `width_px`, `cut_off_px`, and `cells_truncated` with the
+  first ten `truncated_cells` (row, column name) — or `cells_wrapped` when the
+  view has "wrap content" on. An embedded grid's scroll box spans the window
+  while the grid starts in the text column, so `cut_off_px` measures past the
+  box's scroll range and past the window's edge, not the box's width.
 - `clipped_blocks`, `images_failed` and `images_loading` as block ids, and
   `toggles_not_open`: ids asked to open that are shown closed.
 

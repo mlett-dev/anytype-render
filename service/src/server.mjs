@@ -338,6 +338,19 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 	const wrapper = document.querySelector('.editorWrapper');
 	const blockId = el => el.closest('[id^="block-"]')?.id.slice('block-'.length) || null;
 	const overflowsX = el => el.scrollWidth > el.clientWidth + 1;
+	// Width of `inner` the GUI shows only after scrolling `box` sideways: what
+	// reaches past the box's visible edge or the window's. An embedded grid's
+	// scroll box spans the window while the grid starts in the text column, so
+	// the box's width says nothing about how much is cut; and the box's
+	// scrollWidth counts its padding, which is not content.
+	const hiddenX = (inner, box) => {
+		if (!inner || !box) {
+			return 0;
+		}
+		const b = box.getBoundingClientRect();
+		const edge = Math.min(b.left + box.clientLeft + box.clientWidth, window.innerWidth);
+		return Math.max(0, Math.round(inner.getBoundingClientRect().right - edge));
+	};
 	// Cut by its box: wider than it, overflow hidden (an ellipsis is that too).
 	const clipsX = el => overflowsX(el) && (getComputedStyle(el).overflowX !== 'visible');
 	// In the picture: overlaps the captured area and is laid out at all.
@@ -376,9 +389,8 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 				block_id: blockId(wrap),
 				column_widths_px: rows.length ? [...rows[0].querySelectorAll('.cell')].map(c => Math.round(c.getBoundingClientRect().width)) : [],
 				width_px: Math.round(wrap.querySelector('.table').getBoundingClientRect().width),
-				visible_width_px: Math.round(wrap.clientWidth),
-				// Wider than the page: the GUI scrolls it sideways, so part is hidden.
-				cut_off: overflowsX(wrap),
+				// Wider than the page: the GUI scrolls it sideways, so this much is hidden.
+				cut_off_px: hiddenX(wrap.querySelector('.table'), wrap),
 				cells_wrapped: wrapped,
 				cells_clipped: clipped.length,
 				clipped_cells: first10(clipped),
@@ -397,19 +409,33 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 		// Every view type marks its rows or cards record-<id>; a board's
 		// "new card" placeholder is record-<column>-add.
 		const records = [...block.querySelectorAll('[id^="record-"]')].filter(el => !el.id.endsWith('-add'));
-		const out = {
-			block_id: id,
-			kind: block.querySelector('.isCollection') ? 'collection' : 'query',
-			view,
-			rows_shown: records.filter(captured).length,
-		};
-		let total;
+		const kind = block.querySelector('.isCollection') ? 'collection' : 'query';
+		const out = { block_id: id, kind, view };
+		// What it shows: an embedded view has views of its own, with their own
+		// filters and sorts, whatever the query or collection it points at
+		// shows when opened. The object's own dataview block is "dataview".
 		try {
-			total = S?.Record?.getMeta(S.Record.getSubId(objectId, id), '')?.total;
+			const meta = S.Record.getMeta(S.Record.getSubId(objectId, id), '');
+			const v = S.Record.getView(objectId, id, meta.viewId) || S.Record.getViews(objectId, id)[0];
+			const target = (id === 'dataview') ? '' : S.Block.getLeaf(objectId, id)?.content?.targetObjectId;
+			if (target) {
+				const d = S.Detail.get(objectId, target, [ 'name', 'setOf' ]);
+				out.source_id = target;
+				out.source_name = d.name || '';
+				if ((kind === 'query') && Array.isArray(d.setOf) && d.setOf.length) {
+					out.query_of = d.setOf.map(t => S.Record.getTypeById(t)?.name || S.Detail.get(objectId, t, [ 'name' ]).name || t);
+				}
+			}
+			if (v) {
+				out.view_name = v.name || '';
+				out.filters = (v.filters || []).length;
+				out.sorts = (v.sorts || []).length;
+			}
+			if (Number.isFinite(meta.total)) {
+				out.rows_total = meta.total;
+			}
 		} catch {}
-		if (Number.isFinite(total)) {
-			out.rows_total = total;
-		}
+		out.rows_shown = records.filter(captured).length;
 		if ((view !== 'grid') || !content) {
 			return out;
 		}
@@ -441,8 +467,7 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 			...out,
 			columns: head.map(h => ({ name: names.get(keyOf(h)), width_px: Math.round(h.getBoundingClientRect().width) })),
 			width_px: Math.round(content.getBoundingClientRect().width),
-			visible_width_px: scroll ? Math.round(scroll.clientWidth) : null,
-			cut_off: scroll ? overflowsX(scroll) : false,
+			cut_off_px: hiddenX(content, scroll),
 			...(wraps ? { cells_wrapped: wrapped } : { cells_truncated: cut.length, truncated_cells: first10(cut) }),
 		};
 	});
@@ -470,6 +495,53 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 		toggles_not_open: expandIds.filter(id => !document.getElementById(`block-${id}`)?.classList.contains('isToggled')),
 		blocks_in_dom: document.querySelectorAll('[id^="block-"]').length,
 	};
+}
+
+// Embedded queries and collections show one page of rows (the view's page
+// limit, 10 by default) and a "Load more" button below, as in the GUI. With
+// all_rows it is pressed until every row is there, up to ROW_CAP per view.
+const ROW_CAP = 500;
+
+// One press loads offset + 2 x the page limit rows (dataview/view/grid.tsx
+// loadMoreRows, dataview.tsx loadData; list and gallery alike). Setting the
+// offset first makes one press load up to the cap. Board columns count their
+// own offset and take one press per page.
+function pressLoadMore ({ objectId, cap }) {
+	const S = window.Anytype?.Lib?.S;
+	let pressed = 0;
+	for (const block of document.querySelectorAll('.block.blockDataview')) {
+		const buttons = [...block.querySelectorAll('.loadMore')];
+		const rows = [...block.querySelectorAll('[id^="record-"]')].filter(el => !el.id.endsWith('-add')).length;
+		if (!buttons.length || (rows >= cap)) {
+			continue;
+		}
+		const id = block.id.slice('block-'.length);
+		if (S && !block.querySelector('.viewContent.viewBoard')) {
+			try {
+				const subId = S.Record.getSubId(objectId, id);
+				const meta = S.Record.getMeta(subId, '');
+				const view = S.Record.getView(objectId, id, meta.viewId) || S.Record.getViews(objectId, id)[0];
+				const limit = Number(view?.pageLimit) || (block.querySelector('.viewGallery') ? 12 : 10);
+				const want = Math.min(meta.total || cap, cap);
+				S.Record.metaSet(subId, '', { offset: Math.max(meta.offset || 0, want - 2 * limit) });
+			} catch {}
+		}
+		buttons.forEach(b => b.click());
+		pressed += buttons.length;
+	}
+	return pressed;
+}
+
+async function loadAllRows (page, objectId) {
+	const deadline = Date.now() + 30000;
+	while (Date.now() < deadline) {
+		if (!(await page.evaluate(pressLoadMore, { objectId, cap: ROW_CAP }))) {
+			return true;
+		}
+		await page.waitForTimeout(300);
+		await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+	}
+	return false;
 }
 
 // Fonts, and the images inside the captured area, with a deadline: a picture
@@ -501,6 +573,8 @@ async function render (opts) {
 	const format = opts.format === 'png' ? 'png' : 'jpeg';
 	const quality = Math.min(Math.max(Number(opts.quality) || 85, 40), 100);
 	const fullHeight = opts.full_height !== false;
+	const allRows = opts.all_rows === true;
+	const wantImage = opts.image !== false;
 	const expandIds = Array.isArray(opts.expand_ids) ? opts.expand_ids.map(String) : [];
 	const { space_id: spaceId, object_id: objectId } = opts;
 	if (!spaceId || !objectId) {
@@ -586,6 +660,8 @@ async function render (opts) {
 		// Still loading after 10 s: take the picture anyway, and say so.
 		const networkIdle = await page.waitForLoadState('networkidle', { timeout: 10000 }).then(() => true, () => false);
 		await page.waitForTimeout(800);
+		// Before the height is measured: more rows make the object taller.
+		const rowsLoaded = allRows ? await loadAllRows(page, objectId) : true;
 
 		const url = page.url();
 		if (url.includes('/auth/')) {
@@ -633,6 +709,7 @@ async function render (opts) {
 			...(networkIdle ? [] : [ 'network' ]),
 			...(fonts ? [] : [ 'fonts' ]),
 			...(layout.images_loading.length ? [ 'images' ] : []),
+			...(rowsLoaded ? [] : [ 'rows' ]),
 		];
 		if (opts.debug) {
 			// The lowest leaf elements: what the height crop measured.
@@ -643,7 +720,7 @@ async function render (opts) {
 				.sort((a, b) => b.r.bottom - a.r.bottom).slice(0, 5)
 				.map(x => `${x.el.tagName}.${String(x.el.className).slice(0, 50)} bottom=${Math.round(x.r.bottom)} h=${Math.round(x.r.height)}`));
 		}
-		const image = await page.screenshot({ type: format, ...(format === 'jpeg' ? { quality } : {}) });
+		const image = wantImage ? await page.screenshot({ type: format, ...(format === 'jpeg' ? { quality } : {}) }) : Buffer.alloc(0);
 
 		await gw.closeObject(HEART, token, spaceId, objectId).catch(e => log('ObjectClose:', e.message));
 
