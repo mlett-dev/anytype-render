@@ -55,7 +55,8 @@ Nothing else; the smoke test compares `block-list` before and after. Answered
 locally because their effect is process- or account-wide:
 `InitialSetParameters`, `FileSetAutoDownload` (persisted in the account
 config otherwise), `FileAutoDownloadSetLimit`, `AccountPreloadRemainingSpaces`,
-`AppSetDeviceState`.
+`AppSetDeviceState`; and `ObjectCleanupSuggestions`, which the frontend sends a
+few seconds after opening a space for a sidebar badge.
 
 Measured over 20 renders: heart grew by 27 MiB over the first 10 and by
 0.8 MiB over the next 10 — warm caches; the frontend's subscriptions use fixed
@@ -155,6 +156,13 @@ detection on the `pageMain…` page classes.
   (board columns count their own offset and take one press per page). An
   embedded view has views of its own, with their own filters: it is not the
   query it points at opened on its own.
+- `"views": [{"block_id", "view"}]` shows other views than the active ones,
+  by name or id, as a click on the view tab does: the block's `viewId` in the
+  record store and in the block's content (which makes it render again). The
+  tab also sends `BlockDataviewViewSetActive`, which only stores the device's
+  active view; the daemon does not send it. `block_id` may be left out when
+  the object shows one query or collection; an unknown view or block is a 400
+  that lists what there is.
 - An object in the bin opens read-only, with the bin banner at the top.
 
 ## Layout report
@@ -180,7 +188,8 @@ Per render, next to the image:
   `kind` (query or collection), `view` (grid, list, gallery, board, …); for
   an embedded view the object it points at (`source_id`, `source_name`, and
   for a query the types it lists, `query_of`); the active view's `view_name`
-  with its `filters` and `sorts` counts; `rows_shown` (in the image) and
+  with its `filters` and `sorts` counts, and `views`, the names of all of
+  them, when there are several; `rows_shown` (in the image) and
   `rows_total` (from the frontend's record store); for a grid also `columns`
   (name, width), `width_px`, `cut_off_px`, and `cells_truncated` with the
   first ten `truncated_cells` (row, column name) — or `cells_wrapped` when the

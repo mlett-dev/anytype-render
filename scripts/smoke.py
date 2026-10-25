@@ -246,6 +246,12 @@ def build(s):
         source=lambda b: (grid(b)["source_id"] == query and grid(b)["query_of"] == ["Page"]
                           and grid(b)["view_name"] and isinstance(grid(b)["filters"], int), lay(b)["dataviews"]),
     ))
+    # A second view, shown as a click on its tab shows it (nothing is saved).
+    call("query-view-create", space_id=sp, object_id=query, name="Galerie", layout="gallery")
+    add("query object, other view", query, {"views": [{"view": "Galerie"}]}, page=False, check=expect(
+        view=lambda b: (grid(b)["view"] == "gallery" and grid(b)["view_name"] == "Galerie"
+                        and "Galerie" in grid(b)["views"], lay(b)["dataviews"]),
+    ))
     add("query object", query, page=False, check=expect(
         layout=lambda b: (lay(b)["layout"] == "set", lay(b)["layout"]),
         grid=lambda b: (grid(b)["kind"] == "query" and grid(b)["view"] == "grid" and grid(b)["rows_total"] >= 1, lay(b)["dataviews"]),

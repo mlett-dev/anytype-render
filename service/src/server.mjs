@@ -431,6 +431,10 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 				out.filters = (v.filters || []).length;
 				out.sorts = (v.sorts || []).length;
 			}
+			const all = S.Record.getViews(objectId, id);
+			if (all.length > 1) {
+				out.views = all.map(x => x.name || x.id);
+			}
 			if (Number.isFinite(meta.total)) {
 				out.rows_total = meta.total;
 			}
@@ -495,6 +499,36 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 		toggles_not_open: expandIds.filter(id => !document.getElementById(`block-${id}`)?.classList.contains('isToggled')),
 		blocks_in_dom: document.querySelectorAll('[id^="block-"]').length,
 	};
+}
+
+// Views asked for, switched as a click on a view tab does (dataview/
+// controls.tsx onViewSet): the block's viewId in the record store, which the
+// dataview loads when it renders next, and in the block's content, which makes
+// it render. The tab also sends BlockDataviewViewSetActive, which stores the
+// device's active view; this does not (the proxy would refuse it). A view is named by id
+// or by name; block_id may be left out when the object shows one view block.
+function switchViews ({ objectId, wanted }) {
+	const S = window.Anytype?.Lib?.S;
+	const blocks = [...document.querySelectorAll('.block.blockDataview')].map(b => b.id.slice('block-'.length));
+	const out = { switched: [], errors: [] };
+	for (const { block_id: asked, view } of wanted) {
+		const id = asked || ((blocks.length === 1) ? blocks[0] : '');
+		if (!blocks.includes(id)) {
+			out.errors.push(asked ? `no query or collection with block_id ${asked} is shown` : `block_id is needed: the object shows ${blocks.length} queries or collections`);
+			continue;
+		}
+		const views = S.Record.getViews(objectId, id);
+		const name = String(view || '').trim().toLowerCase();
+		const v = views.find(x => x.id === view) || views.find(x => (x.name || '').trim().toLowerCase() === name);
+		if (!v) {
+			out.errors.push(`block ${id} has no view "${view}"; its views: ${views.map(x => x.name || x.id).join(', ')}`);
+			continue;
+		}
+		S.Record.metaSet(S.Record.getSubId(objectId, id), '', { viewId: v.id });
+		S.Block.updateContent(objectId, id, { viewId: v.id });
+		out.switched.push({ block_id: id, view_id: v.id });
+	}
+	return out;
 }
 
 // Embedded queries and collections show one page of rows (the view's page
@@ -574,6 +608,7 @@ async function render (opts) {
 	const quality = Math.min(Math.max(Number(opts.quality) || 85, 40), 100);
 	const fullHeight = opts.full_height !== false;
 	const allRows = opts.all_rows === true;
+	const wantViews = Array.isArray(opts.views) ? opts.views.filter(v => v && (typeof v === 'object')) : [];
 	const wantImage = opts.image !== false;
 	const expandIds = Array.isArray(opts.expand_ids) ? opts.expand_ids.map(String) : [];
 	const { space_id: spaceId, object_id: objectId } = opts;
@@ -660,7 +695,16 @@ async function render (opts) {
 		// Still loading after 10 s: take the picture anyway, and say so.
 		const networkIdle = await page.waitForLoadState('networkidle', { timeout: 10000 }).then(() => true, () => false);
 		await page.waitForTimeout(800);
-		// Before the height is measured: more rows make the object taller.
+		// Before the height is measured: another view or more rows change it.
+		if (wantViews.length) {
+			const { errors } = await page.evaluate(switchViews, { objectId, wanted: wantViews });
+			if (errors.length) {
+				throw Object.assign(new Error(errors.join('; ')), { status: 400 });
+			}
+			await page.waitForTimeout(300);
+			await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+			await page.waitForTimeout(300);
+		}
 		const rowsLoaded = allRows ? await loadAllRows(page, objectId) : true;
 
 		const url = page.url();
