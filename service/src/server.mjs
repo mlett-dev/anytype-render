@@ -252,7 +252,7 @@ function isGateway (u, method) {
 		(u.pathname.startsWith('/file/') || u.pathname.startsWith('/image/'));
 }
 
-function initScript ({ accountId, token, theme, spaceId, objectId, expandIds }) {
+function initScript ({ accountId, token, theme, spaceId, objectId, expandIds, panelGroups }) {
 	// Storage.get('accountId') reads the mock's store: JSON under "anytype_".
 	localStorage.setItem('anytype_accountId', JSON.stringify(accountId));
 	// Left sidebars closed: the render is the object, not the space around it.
@@ -262,9 +262,18 @@ function initScript ({ accountId, token, theme, spaceId, objectId, expandIds }) 
 		hideTray: false, showMenuBar: true,
 		flagsMw: { time: false, json: false, request: false, event: false, sync: false, file: false, subscribe: false },
 	}));
-	// Toggles shown open: per space and object, under the unprefixed local key "space".
+	// Toggles shown open: per space and object, under the unprefixed local key
+	// "space". The properties panel keeps its groups' toggles there too, under
+	// its page name.
+	const toggle = {};
 	if (expandIds.length) {
-		localStorage.setItem('space', JSON.stringify({ [spaceId]: { toggle: { [objectId]: expandIds } } }));
+		toggle[objectId] = expandIds;
+	}
+	if (panelGroups.length) {
+		toggle['object/relation'] = panelGroups;
+	}
+	if (Object.keys(toggle).length) {
+		localStorage.setItem('space', JSON.stringify({ [spaceId]: { toggle } }));
 	}
 	// The app resumes a session only when getTab returns a token, and the web
 	// mock's tabs never carry one. Wrap the mock as entry.web.tsx installs it.
@@ -827,6 +836,86 @@ function loadFilterNames ({ objectId, spaceId }) {
 	});
 }
 
+// The properties panel the header's info button opens on the right
+// (header/main/object.tsx onRelation, sidebar/page/object/relation.tsx,
+// v0.56.1): the type's properties, then Hidden and Local, the keys the object
+// holds that its type does not list. Local lists every key the object holds,
+// whatever its value, so a key kept with a null value shows there as an empty
+// field: null says so.
+const PANEL_GROUPS = [ 'hidden', 'local' ];
+
+function propertiesPanel ({ objectId }) {
+	const { S } = window.Anytype.Lib;
+	const panel = document.querySelector('#sidebarRight');
+	const groups = panel ? [...panel.querySelectorAll('[id^="relationGroup-"]')] : [];
+	if (!groups.length) {
+		return null;
+	}
+	const raw = S.Detail.map?.get(objectId)?.get(objectId);
+	const prefix = 'sidebarObjectRelation-';
+	const suffix = `-${objectId}`;
+	const sections = groups.map((group) => {
+		// The cell itself, not the object chips inside it, whose ids share the prefix.
+		const cells = [...group.querySelectorAll(`.wrap > .cell[id^="${prefix}"]`)].filter(cell => cell.id.endsWith(suffix));
+		const properties = cells.map((cell) => {
+			const key = cell.id.slice(prefix.length, cell.id.length - suffix.length);
+			const wrap = cell.closest('.wrap') || cell.parentElement;
+			const entry = { name: (wrap?.querySelector('.name')?.textContent || '').trim(), key };
+			const stored = raw?.get ? raw.get(key) : undefined;
+			if (cell.classList.contains('c-checkbox')) {
+				entry.value = stored ? 'checked' : 'unchecked';
+			} else
+			if (cell.querySelector('.empty')) {
+				entry.empty = true;
+			} else {
+				entry.value = (cell.innerText || '').replace(/\s+/g, ' ').trim();
+			}
+			if (stored === null) {
+				entry.null = true;
+			}
+			return entry;
+		});
+		const id = group.id.slice('relationGroup-'.length);
+		const name = (group.querySelector(':scope > .titleWrap .label')?.textContent || '').trim();
+		return { section: id, ...(name ? { name } : {}), properties };
+	});
+	const closed = groups.filter(g => g.querySelector(':scope > .list.withToggle') && !g.querySelector(':scope > .list.isOpen'));
+	return { sections, ...(closed.length ? { closed: closed.map(g => g.id.slice('relationGroup-'.length)) } : {}) };
+}
+
+// The window height the panel needs to show every property: its scrolling
+// body's full height plus what sits around it.
+function panelNeed () {
+	const panel = document.querySelector('#sidebarRight');
+	if (!panel) {
+		return 0;
+	}
+	let need = 0;
+	for (const el of panel.querySelectorAll('*')) {
+		const cs = getComputedStyle(el);
+		if (/(auto|scroll)/.test(cs.overflowY) && (el.scrollHeight > el.clientHeight)) {
+			const r = el.getBoundingClientRect();
+			need = Math.max(need, r.top + el.scrollHeight + (window.innerHeight - r.bottom));
+		}
+	}
+	return Math.ceil(need);
+}
+
+// The lowest visible element of the panel, as contentBottom measures the page.
+function panelBottom () {
+	let max = 0;
+	for (const el of document.querySelectorAll('#sidebarRight [id^="relationGroup-"] *')) {
+		if (el.childElementCount) {
+			continue;
+		}
+		const r = el.getBoundingClientRect();
+		if ((r.height > 0) && (r.width > 0) && (getComputedStyle(el).visibility !== 'hidden') && (el.textContent || '').trim()) {
+			max = Math.max(max, r.bottom);
+		}
+	}
+	return Math.ceil(max);
+}
+
 function closeMenus () {
 	const { S } = window.Anytype.Lib;
 	S.Menu?.closeAll?.();
@@ -911,6 +1000,7 @@ async function render (opts) {
 	const allRows = opts.all_rows === true;
 	const wantViews = Array.isArray(opts.views) ? opts.views.filter(v => v && (typeof v === 'object')) : [];
 	const showFilters = opts.show_filters === true;
+	const showProperties = opts.show_properties === true;
 	const wantImage = opts.image !== false;
 	const expandIds = Array.isArray(opts.expand_ids) ? opts.expand_ids.map(String) : [];
 	const { space_id: spaceId, object_id: objectId } = opts;
@@ -970,7 +1060,7 @@ async function render (opts) {
 			}
 		});
 		page.on('pageerror', e => report.page_errors.push(String(e).slice(0, 200)));
-		await page.addInitScript(initScript, { accountId: ACCOUNT_ID, token, theme, spaceId, objectId, expandIds });
+		await page.addInitScript(initScript, { accountId: ACCOUNT_ID, token, theme, spaceId, objectId, expandIds, panelGroups: showProperties ? PANEL_GROUPS : [] });
 
 		const route = `/main/object/${encodeURIComponent(objectId)}/spaceId/${encodeURIComponent(spaceId)}`;
 		await page.goto(`${APP_ORIGIN}${route}?server=${encodeURIComponent(APP_ORIGIN)}`);
@@ -1022,6 +1112,18 @@ async function render (opts) {
 			await page.waitForTimeout(200);
 		}
 		const rowsLoaded = allRows ? await loadAllRows(page, objectId) : true;
+		// The info button opens the panel; layouts without one (types,
+		// properties) have none.
+		let panelOpened = false;
+		if (showProperties) {
+			if (await page.evaluate(() => Boolean(document.querySelector('#button-header-relation')))) {
+				await page.evaluate(() => document.querySelector('#button-header-relation').click());
+				panelOpened = await page.waitForSelector('#sidebarRight [id^="relationGroup-"]', { timeout: 5000 }).then(() => true, () => false);
+				// The panel slides in (J.Constant.delay.sidebar) and loads values.
+				await page.waitForTimeout(600);
+				await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+			}
+		}
 
 		const url = page.url();
 		if (url.includes('/auth/')) {
@@ -1034,7 +1136,10 @@ async function render (opts) {
 		let truncated = false;
 		if (fullHeight) {
 			for (let i = 0; i < 2; i++) {
-				const h = await page.evaluate(() => (document.querySelector('#page')?.scrollHeight || document.documentElement.scrollHeight));
+				let h = await page.evaluate(() => (document.querySelector('#page')?.scrollHeight || document.documentElement.scrollHeight));
+				if (panelOpened) {
+					h = Math.max(h, await page.evaluate(panelNeed));
+				}
 				const want = Math.min(Math.max(h, minHeight), MAX_HEIGHT);
 				truncated = h > MAX_HEIGHT;
 				if (want === height) {
@@ -1052,7 +1157,7 @@ async function render (opts) {
 		// content uses, and their dataview stretches to fill the window. Cut
 		// below the lowest leaf element (text, icon, row), which containers
 		// stretched to the window cannot fake.
-		const bottom = await page.evaluate(contentBottom);
+		const bottom = Math.max(await page.evaluate(contentBottom), panelOpened ? await page.evaluate(panelBottom) : 0);
 		if (fullHeight) {
 			const cut = Math.min(height, Math.max(320, bottom + 48));
 			if (cut < height) {
@@ -1068,6 +1173,10 @@ async function render (opts) {
 		// load, rules inside a filter group above all. ObjectSearch is a read.
 		await page.evaluate(loadFilterNames, { objectId, spaceId }).catch(() => {});
 		const layout = await page.evaluate(layoutReport, { objectId, expandIds, captureHeight: height, bottom });
+		if (showProperties) {
+			layout.properties_panel = (panelOpened && await page.evaluate(propertiesPanel, { objectId })) ||
+				{ unavailable: 'this layout has no properties panel' };
+		}
 		const unsettled = [
 			...(networkIdle ? [] : [ 'network' ]),
 			...(fonts ? [] : [ 'fonts' ]),
