@@ -159,6 +159,11 @@ detection on the `pageMain…` page classes.
   (board columns count their own offset and take one press per page). An
   embedded view has views of its own, with their own filters: it is not the
   query it points at opened on its own.
+- `"show_filters": true` opens the filter and sort bar of every view, as a
+  click on its filter button does (its sort button for a view with sorts
+  only): a toggle in the frontend's local storage. The toggle is kept per
+  object and view id, and embedded blocks showing the same view share it, so
+  each block is clicked until its own bar shows.
 - `"views": [{"block_id", "view"}]` shows other views than the active ones,
   by name or id, as a click on the view tab does: the block's `viewId` in the
   record store and in the block's content (which makes it render again). The
@@ -190,9 +195,11 @@ Per render, next to the image:
 - `dataviews` (queries and collections, embedded or the object itself):
   `kind` (query or collection), `view` (grid, list, gallery, board, …); for
   an embedded view the object it points at (`source_id`, `source_name`, and
-  for a query the types it lists, `query_of`); the active view's `view_name`
-  with its `filters` and `sorts` counts, and `views`, the names of all of
-  them, when there are several; `rows_shown` (in the image), `rows_loaded`
+  for a query the types it lists, `query_of`); the active view's `view_name`;
+  `filters`, the filters the GUI applies (lib/relation.ts `isFilterActive`),
+  `filters_inactive` for stored ones without a value, which the bar shows but
+  which filter nothing, and `sorts`; `filter_bar` when the filter bar is open;
+  `views`, the names of all of them, when there are several; `rows_shown` (in the image), `rows_loaded`
   and `rows_total` (from the frontend's record store), and `load_more` when
   the view shows a "Load more" button; `in_image: false` when the block lies outside the picture;
   for a grid also `columns` (name, width, and for a column with cut-short

@@ -280,8 +280,17 @@ def build(s):
     view = (call("query-inspect", space_id=sp, object_id=nothing).get("views") or [{}])[0].get("id")
     call("query-filter-add", space_id=sp, object_id=nothing, view_id=view, property_key="name",
          condition="equal", value="kein Objekt heisst so")
+    # A second filter without a value: stored, shown in the bar, applied by
+    # nobody. The report counts the applied one only.
+    call("query-filter-add", space_id=sp, object_id=nothing, view_id=view, property_key="description",
+         condition="equal", value="")
     add("empty query", nothing, page=False, check=expect(
         empty=lambda b: (grid(b)["rows_total"] == 0 and grid(b)["rows_shown"] == 0, lay(b)["dataviews"]),
+        filters=lambda b: (grid(b)["filters"] == 1 and grid(b)["filters_inactive"] == 1 and "filter_bar" not in grid(b),
+                           lay(b)["dataviews"]),
+    ))
+    add("empty query, filter bar open", nothing, {"show_filters": True}, page=False, check=expect(
+        bar=lambda b: (grid(b).get("filter_bar") is True, lay(b)["dataviews"]),
     ))
 
     # A collection of 14, one with a name too long for its column.

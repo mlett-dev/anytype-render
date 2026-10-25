@@ -428,8 +428,53 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 			}
 			if (v) {
 				out.view_name = v.name || '';
-				out.filters = (v.filters || []).length;
-				out.sorts = (v.sorts || []).length;
+				// What the GUI applies: filters on relations that still exist
+				// (lib/dataview.ts getFilteredFilters), and of those the ones
+				// with a value (lib/relation.ts isFilterActive, v0.56.1). The
+				// filter bar shows the rest too, but they filter nothing.
+				const I = window.Anytype.Lib.I;
+				const rel = key => S.Record.getRelationByKey(key);
+				const advanced = f => [ I.FilterOperator.And, I.FilterOperator.Or ].includes(f.operator);
+				const exists = r => r && !r.isDeleted && !r.isArchived;
+				const valueSet = (x) => {
+					if ((x === null) || (x === undefined)) {
+						return false;
+					}
+					if (Array.isArray(x) || (typeof x === 'string')) {
+						return x.length > 0;
+					}
+					return (typeof x === 'number') || (typeof x === 'boolean') || !!x;
+				};
+				const active = (f) => {
+					if (!f) {
+						return false;
+					}
+					if (!f.relationKey && advanced(f)) {
+						return (f.nestedFilters || []).some(active);
+					}
+					if (f.condition == I.FilterCondition.None) {
+						return false;
+					}
+					if ([ I.FilterCondition.Empty, I.FilterCondition.NotEmpty ].includes(f.condition)) {
+						return true;
+					}
+					const r = rel(f.relationKey);
+					if (!r) {
+						return false;
+					}
+					if ((r.format == I.RelationType.Date) && ((f.condition == I.FilterCondition.In) ||
+						![ I.FilterQuickOption.NumberOfDaysAgo, I.FilterQuickOption.NumberOfDaysNow, I.FilterQuickOption.ExactDate ].includes(f.quickOption))) {
+						return true;
+					}
+					return valueSet(f.value);
+				};
+				const shown = (v.filters || []).filter(f => f && (advanced(f) || exists(rel(f.relationKey))));
+				const applied = shown.filter(active).length;
+				out.filters = applied;
+				if (shown.length > applied) {
+					out.filters_inactive = shown.length - applied;
+				}
+				out.sorts = (v.sorts || []).filter(x => x && exists(rel(x.relationKey))).length;
 			}
 			const all = S.Record.getViews(objectId, id);
 			if (all.length > 1) {
@@ -468,6 +513,10 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 		// The GUI's own sign that more rows exist than it shows.
 		if (block.querySelector('.loadMore')) {
 			out.load_more = true;
+		}
+		// The filter and sort bar is open: the image shows each filter.
+		if (block.querySelector('.dataviewFilters')) {
+			out.filter_bar = true;
 		}
 		if (!captured(block)) {
 			out.in_image = false;
@@ -579,6 +628,45 @@ function switchViews ({ objectId, wanted }) {
 	return out;
 }
 
+// The filter and sort bar under a view's tabs, opened as a click on the
+// view's filter button opens it (dataview/controls.tsx onButton, then
+// dataview.tsx toggleFilters): a toggle in the frontend's local storage,
+// nothing is written. Only views whose bar is closed and has something to
+// show: without filters the filter button opens the add-filter menu, so a
+// view with sorts only gets its sort button. The toggle is kept per object
+// and view id, and embedded blocks showing the same view share the id, so a
+// click can close what an earlier one opened: the caller clicks each block
+// until its own bar shows, at most twice. A menu that opens anyway (a
+// read-only view) is closed again.
+function filterBarButtons ({ objectId }) {
+	const { S, I } = window.Anytype.Lib;
+	const exists = (key) => {
+		const r = S.Record.getRelationByKey(key);
+		return r && !r.isDeleted && !r.isArchived;
+	};
+	const advanced = f => [ I.FilterOperator.And, I.FilterOperator.Or ].includes(f.operator);
+	const out = [];
+	for (const block of document.querySelectorAll('.block.blockDataview')) {
+		const id = block.id.slice('block-'.length);
+		const meta = S.Record.getMeta(S.Record.getSubId(objectId, id), '');
+		const view = S.Record.getView(objectId, id, meta.viewId) || S.Record.getViews(objectId, id)[0];
+		if (!view || block.querySelector('.dataviewFilters')) {
+			continue;
+		}
+		const filters = (view.filters || []).some(f => f && (advanced(f) || exists(f.relationKey)));
+		const sorts = (view.sorts || []).some(x => x && exists(x.relationKey));
+		if (filters || sorts) {
+			out.push({ block: id, button: `#button-${id}-${filters ? 'filter' : 'sort'}` });
+		}
+	}
+	return out;
+}
+
+function closeMenus () {
+	const { S } = window.Anytype.Lib;
+	S.Menu?.closeAll?.();
+}
+
 // Embedded queries and collections show one page of rows (the view's page
 // limit, 10 by default) and a "Load more" button below, as in the GUI. With
 // all_rows it is pressed until every row is there, up to ROW_CAP per view.
@@ -657,6 +745,7 @@ async function render (opts) {
 	const fullHeight = opts.full_height !== false;
 	const allRows = opts.all_rows === true;
 	const wantViews = Array.isArray(opts.views) ? opts.views.filter(v => v && (typeof v === 'object')) : [];
+	const showFilters = opts.show_filters === true;
 	const wantImage = opts.image !== false;
 	const expandIds = Array.isArray(opts.expand_ids) ? opts.expand_ids.map(String) : [];
 	const { space_id: spaceId, object_id: objectId } = opts;
@@ -753,6 +842,20 @@ async function render (opts) {
 			await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
 			await page.waitForTimeout(300);
 		}
+		if (showFilters) {
+			// One block at a time: a click stores the toggle and renders its block.
+			for (const { block, button } of await page.evaluate(filterBarButtons, { objectId })) {
+				for (let i = 0; i < 2; i++) {
+					if (await page.evaluate(id => Boolean(document.querySelector(`#block-${CSS.escape(id)} .dataviewFilters`)), block)) {
+						break;
+					}
+					await page.evaluate(sel => document.querySelector(sel)?.click(), button);
+					await page.waitForTimeout(150);
+					await page.evaluate(closeMenus);
+				}
+			}
+			await page.waitForTimeout(200);
+		}
 		const rowsLoaded = allRows ? await loadAllRows(page, objectId) : true;
 
 		const url = page.url();
@@ -804,6 +907,19 @@ async function render (opts) {
 			...(rowsLoaded ? [] : [ 'rows' ]),
 		];
 		if (opts.debug) {
+			// Every stored filter, and whether the GUI applies it.
+			layout.debug_filters = await page.evaluate((objectId) => {
+				const { S } = window.Anytype.Lib;
+				return [...document.querySelectorAll('.block.blockDataview')].map((block) => {
+					const id = block.id.slice('block-'.length);
+					const meta = S.Record.getMeta(S.Record.getSubId(objectId, id), '');
+					const v = S.Record.getView(objectId, id, meta.viewId) || S.Record.getViews(objectId, id)[0];
+					return { block_id: id, filters: (v?.filters || []).map(f => ({
+						key: f.relationKey, condition: f.condition, operator: f.operator, value: JSON.stringify(f.value)?.slice(0, 40),
+						relation: S.Record.getRelationByKey(f.relationKey) ? 'found' : 'missing',
+					})) };
+				});
+			}, objectId);
 			// The lowest leaf elements: what the height crop measured.
 			layout.debug_lowest = await page.evaluate(() => [...document.querySelectorAll('#page *')]
 				.filter(el => !el.childElementCount)
