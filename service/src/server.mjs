@@ -435,13 +435,40 @@ function layoutReport ({ objectId, expandIds, captureHeight, bottom }) {
 			if (all.length > 1) {
 				out.views = all.map(x => x.name || x.id);
 			}
-			if (Number.isFinite(meta.total)) {
+			// Counts from the subscriptions a view type loads with. Grids, lists
+			// and galleries use the block's own; a board one per column; a
+			// calendar one per day of the month it shows, and the block's own
+			// still holds what the view before it loaded, so it has no totals.
+			const counts = (subIds) => {
+				let total = 0;
+				let loaded = 0;
+				for (const sub of subIds) {
+					total += Number(S.Record.getMeta(sub, '').total) || 0;
+					loaded += S.Record.getRecordIds(sub, '').length;
+				}
+				return { total, loaded };
+			};
+			if ([ 'grid', 'list', 'gallery' ].includes(view) && Number.isFinite(meta.total)) {
+				const c = counts([ S.Record.getSubId(objectId, id) ]);
 				out.rows_total = meta.total;
+				// Loaded, in the picture or not: the rest is behind Load more.
+				out.rows_loaded = Math.max(records.length, c.loaded);
+			} else if (view === 'board') {
+				const groups = S.Record.getGroups(objectId, id).filter(g => !g.isHidden);
+				const c = counts(groups.map(g => S.Record.getGroupSubId(objectId, id, g.id)));
+				out.rows_total = c.total;
+				out.rows_loaded = Math.max(records.length, c.loaded);
+			} else if (view === 'calendar') {
+				// The month it opens on, today's; rows_shown counts its entries.
+				const d = new Date();
+				out.month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 			}
-			// Loaded, in the picture or not: the rest is behind Load more.
-			out.rows_loaded = Math.max(records.length, S.Record.getRecordIds(S.Record.getSubId(objectId, id), '').length);
 		} catch {}
 		out.rows_shown = records.filter(captured).length;
+		// The GUI's own sign that more rows exist than it shows.
+		if (block.querySelector('.loadMore')) {
+			out.load_more = true;
+		}
 		if (!captured(block)) {
 			out.in_image = false;
 		}

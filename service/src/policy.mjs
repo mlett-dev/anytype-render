@@ -22,11 +22,13 @@
 //          AccountPreloadRemainingSpaces  loads every space, not needed to
 //                                 show one object
 //          AppSetDeviceState      foreground/background for the whole heart
-//        and one the frontend sends a few seconds after opening a space:
+//        and some the frontend sends a few seconds after opening a space:
 //          ObjectCleanupSuggestions  counts objects to suggest for the bin,
 //                                 for a sidebar badge (lib/util/data.ts); not
 //                                 in heart v0.50.8, so not read, and a render
 //                                 has no use for it
+//          SpaceInviteGetCurrent  the space's invite link and key, for the share
+//                                 menu: a secret, and of no use to a render
 // Anything else is refused with PERMISSION_DENIED and listed in the report.
 // Before adding a refused call here, read its handler; a write that is global
 // or persistent belongs in LOCAL or stays refused.
@@ -40,6 +42,7 @@ export const ALLOW = new Set([
 	'ObjectSearch',
 	'ObjectSearchSubscribe',
 	'ObjectSearchUnsubscribe',
+	'ObjectGroupsSubscribe',     // a board's columns: the relation's values, an in-memory subscription
 	'ObjectSubscribeIds',
 	'ObjectCrossSpaceSearchSubscribe',
 	'NotificationList',
@@ -54,4 +57,5 @@ export const LOCAL = new Set([
 	'AccountPreloadRemainingSpaces',
 	'AppSetDeviceState',
 	'ObjectCleanupSuggestions',
+	'SpaceInviteGetCurrent',
 ]);

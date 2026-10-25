@@ -252,6 +252,24 @@ def build(s):
         view=lambda b: (grid(b)["view"] == "gallery" and grid(b)["view_name"] == "Galerie"
                         and "Galerie" in grid(b)["views"], lay(b)["dataviews"]),
     ))
+    # A board counts its columns' cards; a calendar has no totals of its own
+    # (it loads day by day), only the month it shows and the entries there.
+    call("query-view-create", space_id=sp, object_id=query, name="Board", layout="kanban", group_property_key="done")
+    call("query-view-create", space_id=sp, object_id=query, name="Kalender", layout="calendar", group_property_key="created_date")
+    # A board's column shows a page of cards (here 10) above its own Load more.
+    add("query object, board", query, {"views": [{"view": "Board"}]}, page=False, check=expect(
+        board=lambda b: (grid(b)["view"] == "board" and grid(b)["load_more"] is True
+                         and 0 < grid(b)["rows_loaded"] < grid(b)["rows_total"], lay(b)["dataviews"]),
+    ))
+    add("query object, board, all rows", query, {"views": [{"view": "Board"}], "all_rows": True}, page=False, check=expect(
+        board=lambda b: ("load_more" not in grid(b) and grid(b)["rows_loaded"] == grid(b)["rows_total"],
+                         (lay(b)["dataviews"], b["unsettled"])),
+    ))
+    add("query object, calendar", query, {"views": [{"view": "Kalender"}]}, page=False, check=expect(
+        calendar=lambda b: (grid(b)["view"] == "calendar" and "rows_total" not in grid(b) and "rows_loaded" not in grid(b)
+                            and grid(b)["month"] == time.strftime("%Y-%m", time.gmtime()) and grid(b)["rows_shown"] >= 1,
+                            lay(b)["dataviews"]),
+    ))
     add("query object", query, page=False, check=expect(
         layout=lambda b: (lay(b)["layout"] == "set", lay(b)["layout"]),
         grid=lambda b: (grid(b)["kind"] == "query" and grid(b)["view"] == "grid" and grid(b)["rows_total"] >= 1, lay(b)["dataviews"]),

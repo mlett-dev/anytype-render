@@ -55,8 +55,11 @@ Nothing else; the smoke test compares `block-list` before and after. Answered
 locally because their effect is process- or account-wide:
 `InitialSetParameters`, `FileSetAutoDownload` (persisted in the account
 config otherwise), `FileAutoDownloadSetLimit`, `AccountPreloadRemainingSpaces`,
-`AppSetDeviceState`; and `ObjectCleanupSuggestions`, which the frontend sends a
-few seconds after opening a space for a sidebar badge.
+`AppSetDeviceState`; and two the frontend sends a few seconds after opening a
+space: `ObjectCleanupSuggestions` for a sidebar badge, and
+`SpaceInviteGetCurrent`, the invite link and key for the share menu, which
+the browser is not to see. `ObjectGroupsSubscribe` reaches heart: a board's
+columns, an in-memory subscription like `ObjectSearchSubscribe`.
 
 Measured over 20 renders: heart grew by 27 MiB over the first 10 and by
 0.8 MiB over the next 10 — warm caches; the frontend's subscriptions use fixed
@@ -190,16 +193,18 @@ Per render, next to the image:
   for a query the types it lists, `query_of`); the active view's `view_name`
   with its `filters` and `sorts` counts, and `views`, the names of all of
   them, when there are several; `rows_shown` (in the image), `rows_loaded`
-  (the rest is behind "Load more") and `rows_total` (from the frontend's
-  record store); `in_image: false` when the block lies outside the picture;
+  and `rows_total` (from the frontend's record store), and `load_more` when
+  the view shows a "Load more" button; `in_image: false` when the block lies outside the picture;
   for a grid also `columns` (name, width, and for a column with cut-short
   text `cells_truncated` and `needs_px`, the width its longest text needs),
   `width_px`, `cut_off_px`, and `cells_truncated` in total — or
   `cells_wrapped` when the view has "wrap content" on. An embedded grid's
   scroll box spans the window while the grid starts in the text column, so
   `cut_off_px` measures past the box's scroll range and past the window's
-  edge, not the box's width. A calendar shows the entries of one month, and
-  `rows_shown` counts those.
+  edge, not the box's width. Totals come from the subscriptions each view
+  type loads with: the block's own for grid, list and gallery, one per column
+  for a board. A calendar loads day by day, so it has no totals: `month` is
+  the month it shows and `rows_shown` counts the entries there.
 - `clipped_blocks`, `images_failed` and `images_loading` as block ids, and
   `toggles_not_open`: ids asked to open that are shown closed.
 
