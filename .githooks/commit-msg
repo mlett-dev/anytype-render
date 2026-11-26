@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# The message is published with the commit: same checks as the content.
+exec "$(git rev-parse --show-toplevel)/scripts/check-private.sh" --msg "$1"

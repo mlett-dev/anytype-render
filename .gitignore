@@ -6,3 +6,5 @@ out/
 local.env
 .private-patterns
 __pycache__/
+# Known secret locations for check-private (values are never stored here).
+.private-secrets

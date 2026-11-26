@@ -227,6 +227,20 @@ Per render, next to the image:
 With `"debug": true` in the request it also lists the lowest visible elements
 (`debug_lowest`), useful when height detection stops fitting after an update.
 
+## Before you commit
+
+This repository is public. `scripts/check-private.sh` refuses credentials and
+token shapes, host paths, real content and identity IDs, IP and e-mail
+addresses and session URLs. With `git config core.hooksPath .githooks` it runs
+by itself on the staged content (`pre-commit`), on the commit message
+(`commit-msg`) and on every commit a push would add (`pre-push`). By hand:
+`--all` for every tracked file, `--range A..B` for commits.
+
+Two git-ignored files hold what the script must not contain: `.private-patterns`
+(installation-specific names, one regex per line) and `.private-secrets`
+(`label<TAB>file:/path` or `label<TAB>cmd:command`; the values are compared and
+never printed).
+
 ## License
 
 MIT, see [LICENSE](LICENSE). This repository contains no Anytype code: the
