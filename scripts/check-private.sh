@@ -129,9 +129,10 @@ case "$MODE" in
   range)
     while IFS= read -r c; do
       git log -1 --format='%B' "$c" | add_text "message:$c"
-      # Only added lines: removed ones are already in the history.
+      # Only added lines, without the diff's "+" (it would join a match, e.g.
+      # "+@file" reads as an e-mail address); removed lines are already public.
       git show --format= --no-color --unified=0 "$c" -- . ':(exclude)go.sum' ':(exclude)*/go.sum' ':(exclude)scripts/check-private.sh' \
-        | grep '^+' | grep -v '^+++ ' | add_text "commit:$c"
+        | grep '^+' | grep -v '^+++ ' | sed 's/^+//' | add_text "commit:$c"
     done < <(git rev-list "$ARG")
     ;;
 esac
